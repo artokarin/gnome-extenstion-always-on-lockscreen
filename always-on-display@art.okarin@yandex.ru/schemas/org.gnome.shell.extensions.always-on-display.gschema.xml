@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.always-on-display"
+          path="/org/gnome/shell/extensions/always-on-display/">
+
+    <key name="disable-on-battery" type="b">
+      <default>true</default>
+      <summary>Disable AOD on battery</summary>
+      <description>When enabled, AOD will be disabled when running on battery power and the screen will blank normally.</description>
+    </key>
+
+    <key name="aod-timeout" type="i">
+      <default>0</default>
+      <summary>AOD timeout in minutes</summary>
+      <description>Time in minutes before the screen blanks after entering AOD mode. 0 means AOD stays on indefinitely.</description>
+      <range min="0" max="480"/>
+    </key>
+
+    <key name="brightness-reduction" type="i">
+      <default>50</default>
+      <summary>Brightness in AOD mode (percent)</summary>
+      <description>Screen brightness level when in AOD mode, as a percentage of the current brightness.</description>
+      <range min="5" max="100"/>
+    </key>
+
+    <key name="fade-in-time" type="i">
+      <default>1500</default>
+      <summary>Fade-in time (ms)</summary>
+      <description>Duration of the fade animation when entering AOD mode (background fading to black).</description>
+      <range min="0" max="5000"/>
+    </key>
+
+    <key name="fade-out-time" type="i">
+      <default>300</default>
+      <summary>Fade-out time (ms)</summary>
+      <description>Duration of the fade animation when exiting AOD mode (background appearing).</description>
+      <range min="0" max="2000"/>
+    </key>
+
+  </schema>
+</schemalist>
