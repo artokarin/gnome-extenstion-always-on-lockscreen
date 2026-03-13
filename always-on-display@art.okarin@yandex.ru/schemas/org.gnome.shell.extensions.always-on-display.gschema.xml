@@ -23,6 +23,13 @@
       <range min="5" max="100"/>
     </key>
 
+    <key name="idle-delay" type="i">
+      <default>10</default>
+      <summary>Idle delay before re-entering AOD (seconds)</summary>
+      <description>Time in seconds of inactivity on the lock screen before AOD re-activates after user interaction.</description>
+      <range min="1" max="120"/>
+    </key>
+
     <key name="fade-in-time" type="i">
       <default>1500</default>
       <summary>Fade-in time (ms)</summary>

@@ -289,10 +289,10 @@ class AlwaysOnDisplay {
         if (!this._inLock || this._inAOD)
             return;
 
-        // Re-enter AOD after standard idle period on the lock screen
-        const IDLE_BEFORE_AOD_MS = 10000; // 10 seconds
+        // Re-enter AOD after idle period on the lock screen
+        const idleDelaySec = this._settings.get_int('idle-delay');
         this._idleWatchId = this._idleMonitor.add_idle_watch(
-            IDLE_BEFORE_AOD_MS,
+            idleDelaySec * 1000,
             () => {
                 this._idleWatchId = 0;
                 if (this._inLock && !this._inAOD && this.isAODEnabled())

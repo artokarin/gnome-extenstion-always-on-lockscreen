@@ -46,6 +46,23 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         });
         generalGroup.add(timeoutRow);
 
+        // Idle delay
+        const idleDelayRow = new Adw.SpinRow({
+            title: 'Idle delay (seconds)',
+            subtitle: 'Inactivity time before AOD re-activates on lock screen',
+            adjustment: new Gtk.Adjustment({
+                lower: 1,
+                upper: 120,
+                step_increment: 1,
+                page_increment: 10,
+                value: settings.get_int('idle-delay'),
+            }),
+        });
+        idleDelayRow.adjustment.connect('value-changed', () => {
+            settings.set_int('idle-delay', idleDelayRow.adjustment.value);
+        });
+        generalGroup.add(idleDelayRow);
+
         // Display group
         const displayGroup = new Adw.PreferencesGroup({
             title: 'Display',
