@@ -333,11 +333,10 @@ class AlwaysOnDisplay {
         this._activeOnce = false;
         log('AOD: lock screen activated');
 
-        // Set up idle watch to enter AOD
-        // If user is already idle (e.g. idle-triggered lock), fires immediately
-        // If user just locked manually (Super+L), waits for idle period
+        // Enter AOD immediately — mirrors the original behavior where
+        // gnome-settings-daemon would blank the display at this point
         if (this.isAODEnabled() && !this._inAOD)
-            this._setupIdleWatch();
+            this._enterAOD();
     }
 
     onLockScreenDeactivated() {
