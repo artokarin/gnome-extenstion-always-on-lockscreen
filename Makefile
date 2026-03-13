@@ -2,7 +2,7 @@ UUID = always-on-display@art.okarin@yandex.ru
 INSTALL_DIR = $(HOME)/.local/share/gnome-shell/extensions/$(UUID)
 SCHEMA_DIR = $(UUID)/schemas
 
-.PHONY: all schemas install uninstall restart
+.PHONY: all schemas install uninstall restart zip
 
 all: schemas install restart
 
@@ -16,6 +16,9 @@ install: schemas
 
 uninstall:
 	rm -rf $(INSTALL_DIR)
+
+zip: schemas
+	cd $(UUID) && zip -r ../$(UUID).zip . -x "schemas/gschemas.compiled"
 
 restart:
 	@echo "Restarting GNOME Shell (Wayland: re-login required)..."
