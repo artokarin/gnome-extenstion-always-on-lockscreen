@@ -160,7 +160,7 @@ class AlwaysOnDisplay {
             return;
 
         this._inAOD = true;
-        log('AOD: entering AOD mode');
+        console.debug('AOD: entering AOD mode');
 
         // Turn off any active lightboxes that may be covering the lock screen
         const ss = Main.screenShield;
@@ -170,7 +170,7 @@ class AlwaysOnDisplay {
         const dialog = ss._dialog;
         if (dialog && dialog._backgroundGroup) {
             const fadeInTime = this._settings.get_int('fade-in-time');
-            log(`AOD: fading background to black over ${fadeInTime}ms`);
+            console.debug(`AOD: fading background to black over ${fadeInTime}ms`);
             dialog._backgroundGroup.remove_all_transitions();
             dialog._backgroundGroup.ease({
                 opacity: 0,
@@ -178,7 +178,7 @@ class AlwaysOnDisplay {
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
         } else {
-            log(`AOD: no dialog or backgroundGroup found (dialog=${!!dialog})`);
+            console.debug(`AOD: no dialog or backgroundGroup found (dialog=${!!dialog})`);
         }
 
         this._reduceBrightness();
@@ -192,7 +192,7 @@ class AlwaysOnDisplay {
             return;
 
         this._inAOD = false;
-        log('AOD: exiting AOD mode');
+        console.debug('AOD: exiting AOD mode');
 
         const dialog = Main.screenShield._dialog;
         if (dialog && dialog._backgroundGroup) {
@@ -285,7 +285,7 @@ class AlwaysOnDisplay {
 
     _clearAODTimeout() {
         if (this._aodTimeoutId !== 0) {
-            GLib.source_remove(this._aodTimeoutId);
+            GLib.Source.remove(this._aodTimeoutId);
             this._aodTimeoutId = 0;
         }
     }
@@ -338,7 +338,7 @@ class AlwaysOnDisplay {
     onLockScreenActivated() {
         this._inLock = true;
         this._activeOnce = false;
-        log('AOD: lock screen activated');
+        console.debug('AOD: lock screen activated');
 
         // Enter AOD immediately — mirrors the original behavior where
         // gnome-settings-daemon would blank the display at this point
@@ -375,11 +375,11 @@ function _hookedSetActive(active) {
 
     if (prevIsActive !== this._isActive) {
         if (!aod.isAODEnabled() || aod._activeOnce) {
-            log('AOD: emitting active-changed');
+            console.debug('AOD: emitting active-changed');
             this.emit('active-changed');
             aod._activeOnce = false;
         } else {
-            log('AOD: suppressing active-changed (keeping display on)');
+            console.debug('AOD: suppressing active-changed (keeping display on)');
         }
     }
 
