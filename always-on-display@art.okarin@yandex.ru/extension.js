@@ -61,6 +61,7 @@ class AlwaysOnDisplay {
             () => {}
         );
 
+        this._powerSignalId = 0;
         this._powerProxy = new UPowerProxy(
             Gio.DBus.system,
             'org.freedesktop.UPower',
@@ -70,7 +71,8 @@ class AlwaysOnDisplay {
                     logError(error, 'AlwaysOnDisplay: UPower proxy error');
                     return;
                 }
-                this._powerProxy.connect('g-properties-changed',
+                this._powerSignalId = this._powerProxy.connect(
+                    'g-properties-changed',
                     this._onPowerChanged.bind(this));
             }
         );
@@ -105,6 +107,11 @@ class AlwaysOnDisplay {
 
         // Restore original lockDialogGroup style by re-running the original method
         this._origRefreshBackground.call(Main.screenShield);
+
+        if (this._powerSignalId !== 0) {
+            this._powerProxy.disconnect(this._powerSignalId);
+            this._powerSignalId = 0;
+        }
 
         this._clearAODTimeout();
         this._clearIdleWatch();
@@ -470,6 +477,8 @@ export default class AlwaysOnDisplayExtension extends Extension {
     }
 
     disable() {
+        // GNOME calls disable() on the switch to the lock screen, where AOD
+        // must keep running — clean up only once the session leaves it.
         if (!Main.sessionMode.isLocked) {
             if (aod !== null) {
                 aod.disable();
