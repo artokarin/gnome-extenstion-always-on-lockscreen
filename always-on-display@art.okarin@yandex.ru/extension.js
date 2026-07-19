@@ -47,7 +47,10 @@ class AlwaysOnDisplay {
             Gio.DBus.session,
             'org.gnome.Mutter.DisplayConfig',
             '/org/gnome/Mutter/DisplayConfig',
-            () => {}
+            (proxy, error) => {
+                if (error)
+                    logError(error, 'AlwaysOnDisplay: DisplayConfig proxy error');
+            }
         );
 
         this._powerSignalId = 0;
@@ -70,7 +73,10 @@ class AlwaysOnDisplay {
             Gio.DBus.session,
             'org.gnome.SettingsDaemon.Power',
             '/org/gnome/SettingsDaemon/Power',
-            () => {}
+            (proxy, error) => {
+                if (error)
+                    logError(error, 'AlwaysOnDisplay: Brightness proxy error');
+            }
         );
 
         this._idleMonitor = global.backend.get_core_idle_monitor();
