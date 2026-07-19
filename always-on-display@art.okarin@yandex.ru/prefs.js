@@ -4,6 +4,31 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
+// Read the <range> of an integer key from the GSettings schema, so the
+// bounds live in one place only
+function _getIntRange(settings, key) {
+    const [type, value] = settings.settings_schema.get_key(key).get_range().deep_unpack();
+    if (type !== 'range')
+        throw new Error(`Schema key '${key}' has no range`);
+    return value.deep_unpack();
+}
+
+function _addSpinRow(group, settings, key, {title, subtitle, step = 1, page = 10}) {
+    const [lower, upper] = _getIntRange(settings, key);
+    const row = new Adw.SpinRow({
+        title,
+        subtitle,
+        adjustment: new Gtk.Adjustment({
+            lower,
+            upper,
+            step_increment: step,
+            page_increment: page,
+        }),
+    });
+    settings.bind(key, row, 'value', Gio.SettingsBindFlags.DEFAULT);
+    group.add(row);
+}
+
 export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
@@ -20,7 +45,6 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         });
         page.add(generalGroup);
 
-        // Disable on battery
         const batteryRow = new Adw.SwitchRow({
             title: 'Disable on battery',
             subtitle: 'Turn off AOD when running on battery power',
@@ -29,39 +53,15 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         generalGroup.add(batteryRow);
 
-        // AOD timeout
-        const timeoutRow = new Adw.SpinRow({
+        _addSpinRow(generalGroup, settings, 'aod-timeout', {
             title: 'AOD timeout (minutes)',
             subtitle: '0 = stay on indefinitely',
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 480,
-                step_increment: 1,
-                page_increment: 10,
-                value: settings.get_int('aod-timeout'),
-            }),
         });
-        timeoutRow.adjustment.connect('value-changed', () => {
-            settings.set_int('aod-timeout', timeoutRow.adjustment.value);
-        });
-        generalGroup.add(timeoutRow);
 
-        // Idle delay
-        const idleDelayRow = new Adw.SpinRow({
+        _addSpinRow(generalGroup, settings, 'idle-delay', {
             title: 'Idle delay (seconds)',
             subtitle: 'Inactivity time before AOD re-activates on lock screen',
-            adjustment: new Gtk.Adjustment({
-                lower: 1,
-                upper: 120,
-                step_increment: 1,
-                page_increment: 10,
-                value: settings.get_int('idle-delay'),
-            }),
         });
-        idleDelayRow.adjustment.connect('value-changed', () => {
-            settings.set_int('idle-delay', idleDelayRow.adjustment.value);
-        });
-        generalGroup.add(idleDelayRow);
 
         // Display group
         const displayGroup = new Adw.PreferencesGroup({
@@ -69,19 +69,18 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         });
         page.add(displayGroup);
 
-        // Brightness reduction
         const brightnessRow = new Adw.ActionRow({
             title: 'AOD brightness (%)',
             subtitle: 'Screen brightness level in AOD mode',
         });
+        const [brightnessLower, brightnessUpper] = _getIntRange(settings, 'brightness-reduction');
         const brightnessScale = new Gtk.Scale({
             orientation: Gtk.Orientation.HORIZONTAL,
             adjustment: new Gtk.Adjustment({
-                lower: 5,
-                upper: 100,
+                lower: brightnessLower,
+                upper: brightnessUpper,
                 step_increment: 5,
                 page_increment: 10,
-                value: settings.get_int('brightness-reduction'),
             }),
             hexpand: true,
             valign: Gtk.Align.CENTER,
@@ -89,9 +88,8 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
             digits: 0,
         });
         brightnessScale.set_size_request(200, -1);
-        brightnessScale.adjustment.connect('value-changed', () => {
-            settings.set_int('brightness-reduction', brightnessScale.adjustment.value);
-        });
+        settings.bind('brightness-reduction', brightnessScale.adjustment, 'value',
+            Gio.SettingsBindFlags.DEFAULT);
         brightnessRow.add_suffix(brightnessScale);
         displayGroup.add(brightnessRow);
 
@@ -101,38 +99,18 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         });
         page.add(animGroup);
 
-        // Fade-in time
-        const fadeInRow = new Adw.SpinRow({
+        _addSpinRow(animGroup, settings, 'fade-in-time', {
             title: 'Fade-in time (ms)',
             subtitle: 'Duration of fade when entering AOD',
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 5000,
-                step_increment: 100,
-                page_increment: 500,
-                value: settings.get_int('fade-in-time'),
-            }),
+            step: 100,
+            page: 500,
         });
-        fadeInRow.adjustment.connect('value-changed', () => {
-            settings.set_int('fade-in-time', fadeInRow.adjustment.value);
-        });
-        animGroup.add(fadeInRow);
 
-        // Fade-out time
-        const fadeOutRow = new Adw.SpinRow({
+        _addSpinRow(animGroup, settings, 'fade-out-time', {
             title: 'Fade-out time (ms)',
             subtitle: 'Duration of fade when exiting AOD',
-            adjustment: new Gtk.Adjustment({
-                lower: 0,
-                upper: 2000,
-                step_increment: 50,
-                page_increment: 100,
-                value: settings.get_int('fade-out-time'),
-            }),
+            step: 50,
+            page: 100,
         });
-        fadeOutRow.adjustment.connect('value-changed', () => {
-            settings.set_int('fade-out-time', fadeOutRow.adjustment.value);
-        });
-        animGroup.add(fadeOutRow);
     }
 }
