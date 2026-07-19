@@ -40,7 +40,7 @@ class AlwaysOnDisplay {
         this._settings = settings;
         this._inAOD = false;
         this._inLock = false;
-        this._activeOnce = false;
+        this._screenBlanked = false;
         this._savedBrightness = -1;
         this._aodTimeoutId = 0;
         this._idleWatchId = 0;
@@ -118,7 +118,7 @@ class AlwaysOnDisplay {
         this._clearUserActiveWatch();
 
         if (this._inAOD)
-            this._exitAODImmediate();
+            this._exitAOD({animate: false});
     }
 
     isAODEnabled() {
@@ -141,17 +141,23 @@ class AlwaysOnDisplay {
 
         if (this._isOnBattery() && this._settings.get_boolean('disable-on-battery')) {
             // Switched to battery while in AOD — blank the screen normally
-            if (this._inAOD)
-                this._exitAODImmediate();
-            // Emit active-changed to let gnome-settings-daemon blank the screen
-            if (Main.screenShield._isActive) {
-                Main.screenShield.emit('active-changed');
-                this._activeOnce = true;
-            }
+            this._blankScreenNormally();
         } else if (!this._isOnBattery() && this._inLock && !this._inAOD) {
             // Switched to AC while locked — enter AOD
             this._turnOnMonitor();
             this._enterAOD();
+        }
+    }
+
+    // Blank the vanilla way: active-changed makes gnome-settings-daemon turn
+    // the display off. _screenBlanked keeps _setActive from re-emitting it.
+    _blankScreenNormally() {
+        if (this._inAOD)
+            this._exitAOD({animate: false});
+
+        if (Main.screenShield._isActive && !this._screenBlanked) {
+            Main.screenShield.emit('active-changed');
+            this._screenBlanked = true;
         }
     }
 
@@ -187,43 +193,37 @@ class AlwaysOnDisplay {
         this._setupUserActiveWatch();
     }
 
-    _exitAOD() {
-        if (!this._inAOD)
+    _exitAOD({animate = true} = {}) {
+        if (animate && !this._inAOD)
             return;
 
         this._inAOD = false;
-        console.debug('AOD: exiting AOD mode');
+        console.debug(`AOD: exiting AOD mode (animate=${animate})`);
 
         const dialog = Main.screenShield._dialog;
         if (dialog && dialog._backgroundGroup) {
-            const fadeOutTime = this._settings.get_int('fade-out-time');
             dialog._backgroundGroup.remove_all_transitions();
-            dialog._backgroundGroup.ease({
-                opacity: 255,
-                duration: fadeOutTime,
-                mode: Clutter.AnimationMode.EASE_IN_QUAD,
-            });
+            if (animate) {
+                dialog._backgroundGroup.ease({
+                    opacity: 255,
+                    duration: this._settings.get_int('fade-out-time'),
+                    mode: Clutter.AnimationMode.EASE_IN_QUAD,
+                });
+            } else {
+                dialog._backgroundGroup.opacity = 255;
+            }
         }
 
         this._restoreBrightness();
         this._clearAODTimeout();
         this._clearUserActiveWatch();
-        this._setupIdleWatch();
-    }
 
-    _exitAODImmediate() {
-        this._inAOD = false;
-
-        const dialog = Main.screenShield._dialog;
-        if (dialog && dialog._backgroundGroup) {
-            dialog._backgroundGroup.remove_all_transitions();
-            dialog._backgroundGroup.opacity = 255;
-        }
-
-        this._restoreBrightness();
-        this._clearAODTimeout();
-        this._clearUserActiveWatch();
-        this._clearIdleWatch();
+        // Animated exit means the user is interacting: re-arm the idle watch.
+        // Immediate exit means the lock screen is going away — drop it.
+        if (animate)
+            this._setupIdleWatch();
+        else
+            this._clearIdleWatch();
     }
 
     _reduceBrightness() {
@@ -273,11 +273,7 @@ class AlwaysOnDisplay {
             () => {
                 this._aodTimeoutId = 0;
                 // AOD timeout expired — blank the screen
-                this._exitAODImmediate();
-                if (!this._activeOnce) {
-                    Main.screenShield.emit('active-changed');
-                    this._activeOnce = true;
-                }
+                this._blankScreenNormally();
                 return GLib.SOURCE_REMOVE;
             }
         );
@@ -337,7 +333,7 @@ class AlwaysOnDisplay {
 
     onLockScreenActivated() {
         this._inLock = true;
-        this._activeOnce = false;
+        this._screenBlanked = false;
         console.debug('AOD: lock screen activated');
 
         // Enter AOD immediately — mirrors the original behavior where
@@ -348,9 +344,9 @@ class AlwaysOnDisplay {
 
     onLockScreenDeactivated() {
         this._inLock = false;
-        this._activeOnce = false;
+        this._screenBlanked = false;
         if (this._inAOD)
-            this._exitAODImmediate();
+            this._exitAOD({animate: false});
     }
 }
 
@@ -374,10 +370,10 @@ function _hookedSetActive(active) {
         aod.onLockScreenDeactivated();
 
     if (prevIsActive !== this._isActive) {
-        if (!aod.isAODEnabled() || aod._activeOnce) {
+        if (!aod.isAODEnabled() || aod._screenBlanked) {
             console.debug('AOD: emitting active-changed');
             this.emit('active-changed');
-            aod._activeOnce = false;
+            aod._screenBlanked = false;
         } else {
             console.debug('AOD: suppressing active-changed (keeping display on)');
         }
