@@ -5,11 +5,9 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
-import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
-import * as Overview from 'resource:///org/gnome/shell/ui/overview.js';
 import {loadInterfaceXML} from 'resource:///org/gnome/shell/misc/fileUtils.js';
 
 // D-Bus interface for display power management
@@ -32,9 +30,6 @@ const BrightnessIface = `<node>
 </node>`;
 const BrightnessProxy = Gio.DBusProxy.makeProxyWrapper(BrightnessIface);
 
-// Singleton AOD controller, accessible from hook functions
-let aod = null;
-
 class AlwaysOnDisplay {
     constructor(settings) {
         this._settings = settings;
@@ -45,13 +40,7 @@ class AlwaysOnDisplay {
         this._aodTimeoutId = 0;
         this._idleWatchId = 0;
         this._userActiveWatchId = 0;
-
-        // Save original ScreenShield methods
-        this._origSetActive = Main.screenShield._setActive;
-        this._origActivateFade = Main.screenShield._activateFade;
-        this._origResetLockScreen = Main.screenShield._resetLockScreen;
-        this._origOnUserBecameActive = Main.screenShield._onUserBecameActive;
-        this._origRefreshBackground = Main.screenShield._refreshBackground;
+        this._injectionManager = new InjectionManager();
 
         // D-Bus proxies
         this._displayProxy = new DisplayConfigProxy(
@@ -88,25 +77,29 @@ class AlwaysOnDisplay {
     }
 
     enable() {
-        Main.screenShield._setActive = _hookedSetActive;
-        Main.screenShield._activateFade = _hookedActivateFade;
-        Main.screenShield._resetLockScreen = _hookedResetLockScreen;
-        Main.screenShield._onUserBecameActive = _hookedOnUserBecameActive;
-        Main.screenShield._refreshBackground = _hookedRefreshBackground;
+        const ss = Main.screenShield;
+
+        this._injectionManager.overrideMethod(ss, '_setActive',
+            original => _createSetActiveHook(this, original));
+        this._injectionManager.overrideMethod(ss, '_activateFade',
+            original => _createActivateFadeHook(this, original));
+        this._injectionManager.overrideMethod(ss, '_resetLockScreen',
+            original => _createResetLockScreenHook(this, original));
+        this._injectionManager.overrideMethod(ss, '_onUserBecameActive',
+            original => _createOnUserBecameActiveHook(this, original));
+        this._injectionManager.overrideMethod(ss, '_refreshBackground',
+            original => _createRefreshBackgroundHook(this, original));
 
         // Always keep lockDialogGroup black — it's the layer behind blurred backgrounds
-        Main.screenShield._lockDialogGroup.set_style('background-color: black;');
+        ss._lockDialogGroup.set_style('background-color: black;');
     }
 
     disable() {
-        Main.screenShield._setActive = this._origSetActive;
-        Main.screenShield._activateFade = this._origActivateFade;
-        Main.screenShield._resetLockScreen = this._origResetLockScreen;
-        Main.screenShield._onUserBecameActive = this._origOnUserBecameActive;
-        Main.screenShield._refreshBackground = this._origRefreshBackground;
+        this._injectionManager.clear();
 
-        // Restore original lockDialogGroup style by re-running the original method
-        this._origRefreshBackground.call(Main.screenShield);
+        // Restore original lockDialogGroup style by re-running the (now
+        // restored) original method
+        Main.screenShield._refreshBackground();
 
         if (this._powerSignalId !== 0) {
             this._powerProxy.disconnect(this._powerSignalId);
@@ -350,137 +343,127 @@ class AlwaysOnDisplay {
     }
 }
 
-// --- Hooked ScreenShield methods ---
-// These run with `this` bound to Main.screenShield
+// --- ScreenShield method overrides ---
+// Each factory takes the controller and the original method; in the returned
+// function `this` is Main.screenShield.
 
-function _hookedRefreshBackground() {
-    // Call the original, which sets _lockDialogGroup style from login-screen settings
-    aod._origRefreshBackground.call(this);
-    // Override with black background
-    this._lockDialogGroup.set_style('background-color: black;');
+function _createRefreshBackgroundHook(controller, original) {
+    return function () {
+        // Call the original, which sets _lockDialogGroup style from login-screen settings
+        original.call(this);
+        // Override with black background
+        this._lockDialogGroup.set_style('background-color: black;');
+    };
 }
 
-function _hookedSetActive(active) {
-    let prevIsActive = this._isActive;
-    this._isActive = active;
+// GNOME 46's _setActive with the active-changed emission made conditional —
+// suppressing it keeps the display on. Re-check upstream on version bumps.
+function _createSetActiveHook(controller, _original) {
+    return function (active) {
+        let prevIsActive = this._isActive;
+        this._isActive = active;
 
-    if (active)
-        aod.onLockScreenActivated();
-    else
-        aod.onLockScreenDeactivated();
+        if (active)
+            controller.onLockScreenActivated();
+        else
+            controller.onLockScreenDeactivated();
 
-    if (prevIsActive !== this._isActive) {
-        if (!aod.isAODEnabled() || aod._screenBlanked) {
-            console.debug('AOD: emitting active-changed');
-            this.emit('active-changed');
-            aod._screenBlanked = false;
+        if (prevIsActive !== this._isActive) {
+            if (!controller.isAODEnabled() || controller._screenBlanked) {
+                console.debug('AOD: emitting active-changed');
+                this.emit('active-changed');
+                controller._screenBlanked = false;
+            } else {
+                console.debug('AOD: suppressing active-changed (keeping display on)');
+            }
+        }
+
+        this._syncInhibitor();
+    };
+}
+
+function _createActivateFadeHook(controller, original) {
+    return function (lightbox, time) {
+        if (controller._inLock) {
+            // Already on lock screen — enter AOD instead of fading to black
+            if (controller.isAODEnabled()) {
+                controller._enterAOD();
+            } else {
+                // AOD disabled (e.g. on battery) — use original fade
+                original.call(this, lightbox, time);
+            }
+            return;
+        }
+
+        // Not yet locked (session going idle) — do the normal fade
+        // but intercept the lightbox completion to prevent blanking
+        Main.uiGroup.set_child_above_sibling(lightbox, null);
+
+        if (controller.isAODEnabled()) {
+            // Show the lightbox fade but then hide it once lock screen is ready
+            lightbox.lightOn(time);
+
+            if (this._becameActiveId === 0) {
+                this._becameActiveId = this.idleMonitor.add_user_active_watch(
+                    this._onUserBecameActive.bind(this));
+            }
         } else {
-            console.debug('AOD: suppressing active-changed (keeping display on)');
+            // AOD disabled — original behavior
+            original.call(this, lightbox, time);
         }
-    }
-
-    this._syncInhibitor();
+    };
 }
 
-function _hookedActivateFade(lightbox, time) {
-    if (aod._inLock) {
-        // Already on lock screen — enter AOD instead of fading to black
-        if (aod.isAODEnabled()) {
-            aod._enterAOD();
+// Full replacement: also covers the shield being merely active (screensaver
+// without lock), and exits AOD to the clock instead of blanking.
+function _createOnUserBecameActiveHook(controller, _original) {
+    return function () {
+        if (this._becameActiveId !== 0) {
+            this.idleMonitor.remove_watch(this._becameActiveId);
+            this._becameActiveId = 0;
+        }
+
+        if (this._isActive || this._isLocked) {
+            // Turn off lightboxes
+            this._longLightbox.lightOff();
+            this._shortLightbox.lightOff();
+
+            // Exit AOD if active — returns to clock view with blurred background
+            if (controller._inAOD)
+                controller._exitAOD();
         } else {
-            // AOD disabled (e.g. on battery) — use original fade
-            aod._origActivateFade.call(this, lightbox, time);
+            this.deactivate(false);
         }
-        return;
-    }
-
-    // Not yet locked (session going idle) — do the normal fade
-    // but intercept the lightbox completion to prevent blanking
-    Main.uiGroup.set_child_above_sibling(lightbox, null);
-
-    if (aod.isAODEnabled()) {
-        // Show the lightbox fade but then hide it once lock screen is ready
-        lightbox.lightOn(time);
-
-        if (this._becameActiveId === 0) {
-            this._becameActiveId = this.idleMonitor.add_user_active_watch(
-                this._onUserBecameActive.bind(this));
-        }
-    } else {
-        // AOD disabled — original behavior
-        aod._origActivateFade.call(this, lightbox, time);
-    }
+    };
 }
 
-function _hookedOnUserBecameActive() {
-    if (this._becameActiveId !== 0) {
-        this.idleMonitor.remove_watch(this._becameActiveId);
-        this._becameActiveId = 0;
-    }
-
-    if (this._isActive || this._isLocked) {
-        // Turn off lightboxes
-        this._longLightbox.lightOff();
-        this._shortLightbox.lightOff();
-
-        // Exit AOD if active — returns to clock view with blurred background
-        if (aod._inAOD)
-            aod._exitAOD();
-    } else {
-        this.deactivate(false);
-    }
-}
-
-function _hookedResetLockScreen(params) {
-    if (this._lockScreenState !== MessageTray.State.HIDDEN)
-        return;
-
-    this._lockScreenGroup.show();
-    this._lockScreenState = MessageTray.State.SHOWING;
-
-    let fadeToBlack = aod.isAODEnabled() ? false : params.fadeToBlack;
-
-    if (params.animateLockScreen) {
-        this._lockDialogGroup.translation_y = -global.screen_height;
-        this._lockDialogGroup.remove_all_transitions();
-        this._lockDialogGroup.ease({
-            translation_y: 0,
-            duration: Overview.ANIMATION_TIME,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-            onComplete: () => {
-                this._lockScreenShown({fadeToBlack, animateFade: true});
-            },
+function _createResetLockScreenHook(controller, original) {
+    return function (params) {
+        // In AOD the lock screen must not fade to black — the display stays on
+        original.call(this, {
+            ...params,
+            fadeToBlack: controller.isAODEnabled() ? false : params.fadeToBlack,
         });
-    } else {
-        this._lockDialogGroup.translation_y = 0;
-        this._lockScreenShown({fadeToBlack, animateFade: false});
-    }
-
-    this._dialog.grab_key_focus();
+    };
 }
 
 // --- Extension entry point ---
 
 export default class AlwaysOnDisplayExtension extends Extension {
     enable() {
-        this._settings = this.getSettings();
-
-        if (aod !== null)
+        if (this._aod)
             return;
 
-        aod = new AlwaysOnDisplay(this._settings);
-        aod.enable();
+        this._aod = new AlwaysOnDisplay(this.getSettings());
+        this._aod.enable();
     }
 
     disable() {
         // GNOME calls disable() on the switch to the lock screen, where AOD
         // must keep running — clean up only once the session leaves it.
-        if (!Main.sessionMode.isLocked) {
-            if (aod !== null) {
-                aod.disable();
-                aod = null;
-            }
-            this._settings = null;
+        if (!Main.sessionMode.isLocked && this._aod) {
+            this._aod.disable();
+            this._aod = null;
         }
     }
 }
