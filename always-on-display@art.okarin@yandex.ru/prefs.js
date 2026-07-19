@@ -2,7 +2,7 @@ import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
 import Gtk from 'gi://Gtk';
 
-import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 // Read the <range> of an integer key from the GSettings schema, so the
 // bounds live in one place only
@@ -34,44 +34,44 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         const settings = this.getSettings();
 
         const page = new Adw.PreferencesPage({
-            title: 'Always On Display',
+            title: _('Always On Display'),
             icon_name: 'display-brightness-symbolic',
         });
         window.add(page);
 
         // General group
         const generalGroup = new Adw.PreferencesGroup({
-            title: 'General',
+            title: _('General'),
         });
         page.add(generalGroup);
 
         const batteryRow = new Adw.SwitchRow({
-            title: 'Disable on battery',
-            subtitle: 'Turn off AOD when running on battery power',
+            title: _('Disable on battery'),
+            subtitle: _('Turn off AOD when running on battery power'),
         });
         settings.bind('disable-on-battery', batteryRow, 'active',
             Gio.SettingsBindFlags.DEFAULT);
         generalGroup.add(batteryRow);
 
         _addSpinRow(generalGroup, settings, 'aod-timeout', {
-            title: 'AOD timeout (minutes)',
-            subtitle: '0 = stay on indefinitely',
+            title: _('AOD timeout (minutes)'),
+            subtitle: _('0 = stay on indefinitely'),
         });
 
         _addSpinRow(generalGroup, settings, 'idle-delay', {
-            title: 'Idle delay (seconds)',
-            subtitle: 'Inactivity time before AOD re-activates on lock screen',
+            title: _('Idle delay (seconds)'),
+            subtitle: _('Inactivity time before AOD re-activates on lock screen'),
         });
 
         // Display group
         const displayGroup = new Adw.PreferencesGroup({
-            title: 'Display',
+            title: _('Display'),
         });
         page.add(displayGroup);
 
         const brightnessRow = new Adw.ActionRow({
-            title: 'AOD brightness (%)',
-            subtitle: 'Screen brightness level in AOD mode',
+            title: _('AOD brightness (%)'),
+            subtitle: _('Screen brightness level in AOD mode'),
         });
         const [brightnessLower, brightnessUpper] = _getIntRange(settings, 'brightness-reduction');
         const brightnessScale = new Gtk.Scale({
@@ -95,20 +95,20 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
 
         // Animation group
         const animGroup = new Adw.PreferencesGroup({
-            title: 'Animation',
+            title: _('Animation'),
         });
         page.add(animGroup);
 
         _addSpinRow(animGroup, settings, 'fade-in-time', {
-            title: 'Fade-in time (ms)',
-            subtitle: 'Duration of fade when entering AOD',
+            title: _('Fade-in time (ms)'),
+            subtitle: _('Duration of fade when entering AOD'),
             step: 100,
             page: 500,
         });
 
         _addSpinRow(animGroup, settings, 'fade-out-time', {
-            title: 'Fade-out time (ms)',
-            subtitle: 'Duration of fade when exiting AOD',
+            title: _('Fade-out time (ms)'),
+            subtitle: _('Duration of fade when exiting AOD'),
             step: 50,
             page: 100,
         });

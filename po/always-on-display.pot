@@ -1,0 +1,82 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the Always On Display package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: Always On Display\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-19 15:18+0300\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=CHARSET\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:37
+msgid "Always On Display"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:44
+msgid "General"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:49
+msgid "Disable on battery"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:50
+msgid "Turn off AOD when running on battery power"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:57
+msgid "AOD timeout (minutes)"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:58
+msgid "0 = stay on indefinitely"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:62
+msgid "Idle delay (seconds)"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:63
+msgid "Inactivity time before AOD re-activates on lock screen"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:68
+msgid "Display"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:73
+msgid "AOD brightness (%)"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:74
+msgid "Screen brightness level in AOD mode"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:98
+msgid "Animation"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:103
+msgid "Fade-in time (ms)"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:104
+msgid "Duration of fade when entering AOD"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:110
+msgid "Fade-out time (ms)"
+msgstr ""
+
+#: always-on-display@art.okarin@yandex.ru/prefs.js:111
+msgid "Duration of fade when exiting AOD"
+msgstr ""
