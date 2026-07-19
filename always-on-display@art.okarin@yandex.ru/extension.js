@@ -91,7 +91,8 @@ class AlwaysOnDisplay {
             original => _createRefreshBackgroundHook(this, original));
 
         // Always keep lockDialogGroup black — it's the layer behind blurred backgrounds
-        ss._lockDialogGroup.set_style('background-color: black;');
+        ss._lockDialogGroup.set_style(null);
+        ss._lockDialogGroup.add_style_class_name('aod-lock-background');
     }
 
     disable() {
@@ -99,6 +100,7 @@ class AlwaysOnDisplay {
 
         // Restore original lockDialogGroup style by re-running the (now
         // restored) original method
+        Main.screenShield._lockDialogGroup.remove_style_class_name('aod-lock-background');
         Main.screenShield._refreshBackground();
 
         if (this._powerSignalId !== 0) {
@@ -351,8 +353,9 @@ function _createRefreshBackgroundHook(controller, original) {
     return function () {
         // Call the original, which sets _lockDialogGroup style from login-screen settings
         original.call(this);
-        // Override with black background
-        this._lockDialogGroup.set_style('background-color: black;');
+        // Drop that inline style (it would win over the CSS class) and keep
+        // the black background from the stylesheet
+        this._lockDialogGroup.set_style(null);
     };
 }
 

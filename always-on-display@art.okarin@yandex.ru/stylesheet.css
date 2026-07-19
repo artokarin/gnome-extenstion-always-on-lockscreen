@@ -1,3 +1,6 @@
 /* Always On Display extension styles */
-/* Currently no custom styles needed - the extension uses
-   opacity animation on existing GNOME Shell elements */
+
+/* Black layer behind the (faded-out) blurred lock screen backgrounds */
+.aod-lock-background {
+    background-color: black;
+}
