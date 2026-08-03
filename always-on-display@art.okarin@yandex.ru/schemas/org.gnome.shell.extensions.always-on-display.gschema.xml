@@ -16,10 +16,16 @@
       <range min="0" max="480"/>
     </key>
 
+    <key name="software-dimming" type="b">
+      <default>false</default>
+      <summary>Dim in software instead of changing the backlight (useful for OLED)</summary>
+      <description>When enabled, AOD dims the lock screen by reducing its opacity over the black background instead of changing the display backlight. Useful with OLED displays.</description>
+    </key>
+
     <key name="brightness-reduction" type="i">
       <default>50</default>
       <summary>Brightness in AOD mode (percent)</summary>
-      <description>Screen brightness level when in AOD mode, as a percentage of the current brightness.</description>
+      <description>Brightness level when in AOD mode, as a percentage of the normal brightness. Applies to whichever dimming method is selected.</description>
       <range min="5" max="100"/>
     </key>
 

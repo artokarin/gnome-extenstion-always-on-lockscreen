@@ -4,6 +4,7 @@
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import St from 'gi://St';
 
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 
@@ -38,6 +39,7 @@ class AlwaysOnDisplay {
         this._inLock = false;
         this._screenBlanked = false;
         this._savedBrightness = -1;
+        this._dimOverlay = null;
         this._aodTimeoutId = 0;
         this._idleWatchId = 0;
         this._promptIdleWatchId = 0;
@@ -131,6 +133,15 @@ class AlwaysOnDisplay {
 
         if (this._inAOD)
             this._exitAOD({animate: false});
+
+        // A backlight left turned down would follow the user into their
+        // session. The overlay needs no such care — destroying it suffices.
+        this._restoreBrightness();
+
+        if (this._dimOverlay) {
+            this._dimOverlay.destroy();
+            this._dimOverlay = null;
+        }
     }
 
     isAODEnabled() {
@@ -184,9 +195,12 @@ class AlwaysOnDisplay {
         if (this._inAOD)
             return;
 
-        // Never black out the password prompt — AOD is for the clock page only
-        if (this._isOnPromptScreen())
+        // Never black out the prompt. Arm the idle watch on the way out —
+        // nothing else would bring AOD back if we lock with the prompt up.
+        if (this._isOnPromptScreen()) {
+            this._setupIdleWatch();
             return;
+        }
 
         this._inAOD = true;
         console.debug('AOD: entering AOD mode');
@@ -210,7 +224,7 @@ class AlwaysOnDisplay {
             console.debug(`AOD: no dialog or backgroundGroup found (dialog=${!!dialog})`);
         }
 
-        this._reduceBrightness();
+        this._dim();
         this._startAODTimeout();
         this._clearIdleWatch();
         this._setupUserActiveWatch();
@@ -237,7 +251,7 @@ class AlwaysOnDisplay {
             }
         }
 
-        this._restoreBrightness();
+        this._undim({animate});
         this._clearAODTimeout();
         this._clearUserActiveWatch();
 
@@ -273,6 +287,81 @@ class AlwaysOnDisplay {
             // Ignore
         }
         this._savedBrightness = -1;
+    }
+
+    // Our own full-stage black actor that the lock screen is dimmed through.
+    // Setting opacity on GNOME's own actors was tried first and lost to the
+    // top panel — shared chrome the shell and other extensions rearrange.
+    _ensureDimOverlay() {
+        if (!this._dimOverlay) {
+            this._dimOverlay = new St.Widget({
+                style_class: 'aod-dim-overlay',
+                // Input has to pass through: any click or key press is what
+                // ends AOD in the first place.
+                reactive: false,
+                opacity: 0,
+            });
+            // Covers every monitor and follows resolution changes by itself
+            this._dimOverlay.add_constraint(new Clutter.BindConstraint({
+                source: global.stage,
+                coordinate: Clutter.BindCoordinate.ALL,
+            }));
+            Main.uiGroup.add_child(this._dimOverlay);
+        }
+
+        // Other extensions reorder uiGroup, so claim the top on every dim
+        // rather than trusting insertion order.
+        Main.uiGroup.set_child_above_sibling(this._dimOverlay, null);
+        return this._dimOverlay;
+    }
+
+    // Black at alpha (1 - N%) is exactly an N% brightness scale, and works on
+    // displays with no backlight control at all.
+    _applySoftwareDim() {
+        const level = this._settings.get_int('brightness-reduction');
+        if (level >= 100)
+            return;
+
+        const opacity = Math.round(255 * (1 - level / 100));
+        console.debug(`AOD: dimming through overlay at opacity ${opacity}`);
+
+        this._ensureDimOverlay().ease({
+            opacity,
+            duration: this._settings.get_int('fade-in-time'),
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
+    }
+
+    _clearSoftwareDim({animate = true} = {}) {
+        if (!this._dimOverlay)
+            return;
+
+        // Drop the dim transition first: assigning opacity while one is
+        // running only retargets it instead of setting the value.
+        this._dimOverlay.remove_transition('opacity');
+        if (animate) {
+            this._dimOverlay.ease({
+                opacity: 0,
+                duration: this._settings.get_int('fade-out-time'),
+                mode: Clutter.AnimationMode.EASE_IN_QUAD,
+            });
+        } else {
+            this._dimOverlay.opacity = 0;
+        }
+    }
+
+    // The setting picks backlight or overlay; _undim() undoes both, since it
+    // may have changed between entering and leaving AOD.
+    _dim() {
+        if (this._settings.get_boolean('software-dimming'))
+            this._applySoftwareDim();
+        else
+            this._reduceBrightness();
+    }
+
+    _undim({animate = true} = {}) {
+        this._clearSoftwareDim({animate});
+        this._restoreBrightness();
     }
 
     _turnOnMonitor() {

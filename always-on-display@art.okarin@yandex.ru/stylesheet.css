@@ -4,3 +4,9 @@
 .aod-lock-background {
     background-color: black;
 }
+
+/* Full-stage layer the lock screen is dimmed through in software-dimming
+   mode. Opaque black; the dim level is its actor opacity. */
+.aod-dim-overlay {
+    background-color: black;
+}

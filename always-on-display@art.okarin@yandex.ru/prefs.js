@@ -69,9 +69,17 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         });
         page.add(displayGroup);
 
+        const softwareDimRow = new Adw.SwitchRow({
+            title: _('Software dimming'),
+            subtitle: _('Dim the lock screen itself instead of the display backlight'),
+        });
+        settings.bind('software-dimming', softwareDimRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        displayGroup.add(softwareDimRow);
+
         const brightnessRow = new Adw.ActionRow({
             title: _('AOD brightness (%)'),
-            subtitle: _('Screen brightness level in AOD mode'),
+            subtitle: _('Level in AOD mode, for the selected dimming method'),
         });
         const [brightnessLower, brightnessUpper] = _getIntRange(settings, 'brightness-reduction');
         const brightnessScale = new Gtk.Scale({
