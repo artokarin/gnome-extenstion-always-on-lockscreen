@@ -8,6 +8,7 @@ import GLib from 'gi://GLib';
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {UnlockDialog} from 'resource:///org/gnome/shell/ui/unlockDialog.js';
 import {loadInterfaceXML} from 'resource:///org/gnome/shell/misc/fileUtils.js';
 
 // D-Bus interface for display power management
@@ -39,6 +40,7 @@ class AlwaysOnDisplay {
         this._savedBrightness = -1;
         this._aodTimeoutId = 0;
         this._idleWatchId = 0;
+        this._promptIdleWatchId = 0;
         this._userActiveWatchId = 0;
         this._injectionManager = new InjectionManager();
 
@@ -96,6 +98,15 @@ class AlwaysOnDisplay {
         this._injectionManager.overrideMethod(ss, '_refreshBackground',
             original => _createRefreshBackgroundHook(this, original));
 
+        // On the prototype, not ss._dialog: the dialog is recreated per lock.
+        // _showClock is private API, so degrade instead of failing enable().
+        if (typeof UnlockDialog?.prototype?._showClock === 'function') {
+            this._injectionManager.overrideMethod(UnlockDialog.prototype, '_showClock',
+                original => _createShowClockHook(this, original));
+        } else {
+            console.debug('AOD: UnlockDialog._showClock missing — prompt re-arm degraded');
+        }
+
         // Always keep lockDialogGroup black — it's the layer behind blurred backgrounds
         ss._lockDialogGroup.set_style(null);
         ss._lockDialogGroup.add_style_class_name('aod-lock-background');
@@ -136,6 +147,13 @@ class AlwaysOnDisplay {
         }
     }
 
+    // The unlock dialog shows either the clock or the password prompt.
+    // AOD must only ever cover the clock page.
+    _isOnPromptScreen() {
+        const dialog = Main.screenShield._dialog;
+        return !!dialog && dialog._activePage === dialog._promptBox;
+    }
+
     _onPowerChanged() {
         if (!this._inLock)
             return;
@@ -164,6 +182,10 @@ class AlwaysOnDisplay {
 
     _enterAOD() {
         if (this._inAOD)
+            return;
+
+        // Never black out the password prompt — AOD is for the clock page only
+        if (this._isOnPromptScreen())
             return;
 
         this._inAOD = true;
@@ -299,8 +321,21 @@ class AlwaysOnDisplay {
             idleDelaySec * 1000,
             () => {
                 this._idleWatchId = 0;
-                if (this._inLock && !this._inAOD && this.isAODEnabled())
-                    this._enterAOD();
+                if (!this._inLock || this._inAOD || !this.isAODEnabled())
+                    return;
+
+                // Don't black out the prompt. Re-arming the idle watch here
+                // would fire right back and spin the shell — wait for input.
+                if (this._isOnPromptScreen()) {
+                    this._promptIdleWatchId = this._idleMonitor.add_user_active_watch(() => {
+                        this._promptIdleWatchId = 0;
+                        if (this._inLock && !this._inAOD)
+                            this._setupIdleWatch();
+                    });
+                    return;
+                }
+
+                this._enterAOD();
             }
         );
     }
@@ -309,6 +344,10 @@ class AlwaysOnDisplay {
         if (this._idleWatchId !== 0) {
             this._idleMonitor.remove_watch(this._idleWatchId);
             this._idleWatchId = 0;
+        }
+        if (this._promptIdleWatchId !== 0) {
+            this._idleMonitor.remove_watch(this._promptIdleWatchId);
+            this._promptIdleWatchId = 0;
         }
     }
 
@@ -349,11 +388,17 @@ class AlwaysOnDisplay {
         if (this._inAOD)
             this._exitAOD({animate: false});
     }
+
+    // The dialog returned to the clock (GNOME's 120s escape or a failed
+    // unlock), so AOD may cover the screen again.
+    onPromptDismissed() {
+        this._setupIdleWatch();
+    }
 }
 
-// --- ScreenShield method overrides ---
+// --- Shell method overrides ---
 // Each factory takes the controller and the original method; in the returned
-// function `this` is Main.screenShield.
+// function `this` is Main.screenShield, or the UnlockDialog for _showClock.
 
 function _createRefreshBackgroundHook(controller, original) {
     return function () {
@@ -453,6 +498,15 @@ function _createResetLockScreenHook(controller, original) {
             ...params,
             fadeToBlack: controller.isAODEnabled() ? false : params.fadeToBlack,
         });
+    };
+}
+
+// UnlockDialog, not ScreenShield: catches GNOME's 120s escape and failed
+// unlocks. Swiping back bypasses this and the user-active watch covers it.
+function _createShowClockHook(controller, original) {
+    return function () {
+        original.call(this);
+        controller.onPromptDismissed();
     };
 }
 
