@@ -1,8 +1,44 @@
 import Adw from 'gi://Adw';
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+
+function _getProperty(name, path, iface, prop, callback) {
+    Gio.DBus.session.call(
+        name, path, 'org.freedesktop.DBus.Properties', 'Get',
+        new GLib.Variant('(ss)', [iface, prop]),
+        null, Gio.DBusCallFlags.NONE, 2000, null,
+        (bus, result) => {
+            try {
+                const [value] = bus.call_finish(result).recursiveUnpack();
+                callback(value);
+            } catch {
+                callback(null);
+            }
+        });
+}
+
+// Whether the display has a backlight to turn down. Prefs runs in its own
+// process and cannot look at the shell's BrightnessManager, so ask D-Bus:
+// GNOME 49+ answers on org.gnome.Shell.Brightness, 46-48 on
+// gnome-settings-daemon, whose interface 49 removed.
+function _hasBacklight(callback) {
+    _getProperty('org.gnome.Shell.Brightness', '/org/gnome/Shell/Brightness',
+        'org.gnome.Shell.Brightness', 'HasBrightnessControl', shellAnswer => {
+            if (typeof shellAnswer === 'boolean') {
+                callback(shellAnswer);
+                return;
+            }
+            _getProperty('org.gnome.SettingsDaemon.Power', '/org/gnome/SettingsDaemon/Power',
+                'org.gnome.SettingsDaemon.Power.Screen', 'Brightness', level => {
+                    // Nobody answered: assume a backlight rather than greying
+                    // out a control that may well work.
+                    callback(level === null ? true : Number.isInteger(level) && level >= 0);
+                });
+        });
+}
 
 // Read the <range> of an integer key from the GSettings schema, so the
 // bounds live in one place only
@@ -71,7 +107,6 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
 
         const softwareDimRow = new Adw.SwitchRow({
             title: _('Software dimming'),
-            subtitle: _('Dim the lock screen itself instead of the display backlight'),
         });
         settings.bind('software-dimming', softwareDimRow, 'active',
             Gio.SettingsBindFlags.DEFAULT);
@@ -79,7 +114,6 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
 
         const brightnessRow = new Adw.ActionRow({
             title: _('AOD brightness (%)'),
-            subtitle: _('Level in AOD mode, for the selected dimming method'),
         });
         const [brightnessLower, brightnessUpper] = _getIntRange(settings, 'brightness-reduction');
         const brightnessScale = new Gtk.Scale({
@@ -100,6 +134,29 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         brightnessRow.add_suffix(brightnessScale);
         displayGroup.add(brightnessRow);
+
+        // Without a backlight there is nothing for hardware dimming to turn
+        // down, and the overlay must not stand in for it silently: it only
+        // darkens the image, which lowers actual light output on OLED alone.
+        // So say so, and leave the level unreachable until the user opts in.
+        let hasBacklight = true;
+        const syncDimmingRows = () => {
+            brightnessRow.sensitive =
+                settings.get_boolean('software-dimming') || hasBacklight;
+            brightnessRow.subtitle = brightnessRow.sensitive
+                ? _('Level in AOD mode, for the selected dimming method')
+                : _('Unavailable: this display has no backlight control. Turn on software dimming to dim it.');
+            softwareDimRow.subtitle = hasBacklight
+                ? _('Dims the lock screen image instead of the backlight. Only OLED panels emit less light this way.')
+                : _('This display has no backlight control, so this is the only way to dim it.');
+        };
+
+        syncDimmingRows();
+        settings.connect('changed::software-dimming', () => syncDimmingRows());
+        _hasBacklight(available => {
+            hasBacklight = available;
+            syncDimmingRows();
+        });
 
         // Animation group
         const animGroup = new Adw.PreferencesGroup({
