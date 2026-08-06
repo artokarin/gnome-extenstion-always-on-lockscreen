@@ -2,7 +2,7 @@
   "uuid": "always-on-display@art.okarin@yandex.ru",
   "name": "Always On Display",
   "description": "Shows clock, date and notifications on a black background instead of turning off the display on the lock screen",
-  "shell-version": ["46", "47", "48", "49"],
+  "shell-version": ["46", "47", "48", "49", "50"],
   "session-modes": ["user", "unlock-dialog"],
   "settings-schema": "org.gnome.shell.extensions.always-on-display",
   "gettext-domain": "always-on-display@art.okarin@yandex.ru",

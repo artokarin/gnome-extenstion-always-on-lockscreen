@@ -39,6 +39,8 @@ class AlwaysOnDisplay {
         this._inLock = false;
         this._screenBlanked = false;
         this._savedBrightness = -1;
+        this._savedDimming = null;
+        this._savedDimmingTarget = null;
         this._dimOverlay = null;
         this._aodTimeoutId = 0;
         this._idleWatchId = 0;
@@ -97,8 +99,13 @@ class AlwaysOnDisplay {
             original => _createResetLockScreenHook(this, original));
         this._injectionManager.overrideMethod(ss, '_onUserBecameActive',
             original => _createOnUserBecameActiveHook(this, original));
-        this._injectionManager.overrideMethod(ss, '_refreshBackground',
-            original => _createRefreshBackgroundHook(this, original));
+
+        // Ubuntu-only patch (configure_login_screen) — absent upstream, so
+        // guard like _showClock below.
+        if (typeof ss._refreshBackground === 'function') {
+            this._injectionManager.overrideMethod(ss, '_refreshBackground',
+                original => _createRefreshBackgroundHook(this, original));
+        }
 
         // On the prototype, not ss._dialog: the dialog is recreated per lock.
         // _showClock is private API, so degrade instead of failing enable().
@@ -118,9 +125,10 @@ class AlwaysOnDisplay {
         this._injectionManager.clear();
 
         // Restore original lockDialogGroup style by re-running the (now
-        // restored) original method
+        // restored) original method. Nothing to restore where Ubuntu's patch
+        // is absent — the style was never set inline there.
         Main.screenShield._lockDialogGroup.remove_style_class_name('aod-lock-background');
-        Main.screenShield._refreshBackground();
+        Main.screenShield._refreshBackground?.();
 
         if (this._powerSignalId !== 0) {
             this._powerProxy.disconnect(this._powerSignalId);
@@ -134,9 +142,10 @@ class AlwaysOnDisplay {
         if (this._inAOD)
             this._exitAOD({animate: false});
 
-        // A backlight left turned down would follow the user into their
-        // session. The overlay needs no such care — destroying it suffices.
-        this._restoreBrightness();
+        // A backlight left turned down, or a borrowed dim target, would follow
+        // the user into their session. The overlay needs no such care —
+        // destroying it suffices.
+        this._undimBacklight();
 
         if (this._dimOverlay) {
             this._dimOverlay.destroy();
@@ -263,17 +272,25 @@ class AlwaysOnDisplay {
             this._clearIdleWatch();
     }
 
+    // GNOME 46-48: the backlight belongs to gnome-settings-daemon. Reports
+    // whether there was anything to dim.
     _reduceBrightness() {
         try {
             const currentBrightness = this._brightnessProxy.Brightness;
-            if (currentBrightness >= 0) {
-                this._savedBrightness = currentBrightness;
-                const reduction = this._settings.get_int('brightness-reduction');
-                const targetBrightness = Math.max(1, Math.round(currentBrightness * reduction / 100));
-                this._brightnessProxy.Brightness = targetBrightness;
-            }
+            // The same test the shell's own brightness slider uses. Plain
+            // `>= 0` would pass: a missing interface reads back as null, and
+            // null >= 0 is true in JS.
+            if (!Number.isInteger(currentBrightness) || currentBrightness < 0)
+                return false;
+
+            this._savedBrightness = currentBrightness;
+            const reduction = this._settings.get_int('brightness-reduction');
+            this._brightnessProxy.Brightness =
+                Math.max(1, Math.round(currentBrightness * reduction / 100));
+            return true;
         } catch {
             // Brightness control not available (e.g. desktop without backlight)
+            return false;
         }
     }
 
@@ -287,6 +304,68 @@ class AlwaysOnDisplay {
             // Ignore
         }
         this._savedBrightness = -1;
+    }
+
+    // GNOME 49 moved the backlight into the shell and dropped the
+    // SettingsDaemon.Power.Screen interface the branch above talks to.
+    _dimViaShell() {
+        const manager = Main.brightnessManager;
+        const scale = manager.globalScale;
+        // Null when no monitor has a backlight — same test the shell uses for
+        // its own HasBrightnessControl.
+        if (!scale)
+            return false;
+
+        this._savedDimming = manager.dimming;
+
+        // dimming clips the backlight to _dimmingTarget instead of scaling it,
+        // so a bare level would be a no-op whenever the user sits below it.
+        // The field is private, so fall back to the system dim level rather
+        // than failing if it ever goes away.
+        if (typeof manager._dimmingTarget === 'number') {
+            const level = this._settings.get_int('brightness-reduction');
+            this._savedDimmingTarget = manager._dimmingTarget;
+            manager._dimmingTarget = scale.value * level / 100;
+        } else {
+            console.debug('AOD: no _dimmingTarget — dimming to the system level');
+        }
+
+        // Assigning _dimmingTarget syncs nothing; the dimming setter does.
+        manager.dimming = true;
+        return true;
+    }
+
+    _undimViaShell() {
+        if (this._savedDimming === null)
+            return;
+
+        const manager = Main.brightnessManager;
+
+        // Restore the target first: the dimming setter below is what syncs the
+        // backlight, and it must sync against the original value. Leaving ours
+        // behind would quietly apply it to the system's own idle dim until the
+        // next shell restart.
+        if (this._savedDimmingTarget !== null) {
+            manager._dimmingTarget = this._savedDimmingTarget;
+            this._savedDimmingTarget = null;
+        }
+
+        // Back to what it was, not to false — the session may have been idle
+        // dimming already when the screen locked.
+        manager.dimming = this._savedDimming;
+        this._savedDimming = null;
+    }
+
+    // Which of the two backlight paths exists depends on the shell version.
+    _dimBacklight() {
+        if (Main.brightnessManager)
+            return this._dimViaShell();
+        return this._reduceBrightness();
+    }
+
+    _undimBacklight() {
+        this._undimViaShell();
+        this._restoreBrightness();
     }
 
     // Our own full-stage black actor that the lock screen is dimmed through.
@@ -350,18 +429,22 @@ class AlwaysOnDisplay {
         }
     }
 
-    // The setting picks backlight or overlay; _undim() undoes both, since it
-    // may have changed between entering and leaving AOD.
+    // The setting picks the mechanism and nothing substitutes for the other
+    // behind the user's back: the overlay only darkens the image, so outside
+    // OLED it is no stand-in for turning the backlight down. Where the
+    // backlight is missing, prefs says so and offers the overlay explicitly.
+    // _undim() undoes both, since the choice may have changed between entering
+    // and leaving AOD.
     _dim() {
         if (this._settings.get_boolean('software-dimming'))
             this._applySoftwareDim();
-        else
-            this._reduceBrightness();
+        else if (!this._dimBacklight())
+            console.debug('AOD: nothing to dim — no backlight, and software dimming is off');
     }
 
     _undim({animate = true} = {}) {
         this._clearSoftwareDim({animate});
-        this._restoreBrightness();
+        this._undimBacklight();
     }
 
     _turnOnMonitor() {

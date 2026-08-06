@@ -14,12 +14,13 @@ After a configurable idle period on the lock screen, AOD re-activates automatica
 
 - Smooth fade-in/fade-out animations when entering/exiting AOD
 - Automatic brightness reduction in AOD mode (and even set it back)
+- Software dimming as an alternative to the backlight, for OLED panels and for displays with no brightness control at all
 - Configurable AOD timeout (should DPMS poweroff after N minutes, disabled by default)
 - Configurable idle delay before AOD re-activates
 - Battery-aware: optionally disables AOD on battery power
+- Reacts to power source changes in real time (AC plugged in → AOD on, unplugged → screen blanks)
 
 ## Install
-- Reacts to power source changes in real time (AC plugged in → AOD on, unplugged → screen blanks)
 
 ```bash
 git clone https://github.com/artokarin/gnome-extenstion-always-on-lockscreen.git
@@ -27,7 +28,7 @@ cd gnome-extenstion-always-on-lockscreen
 make install
 ```
 
-Then log out and log back in (Wayland) or restart GNOME Shell (X11).
+Then log out and log back in (Wayland) or restart GNOME Shell (X11 — GNOME 50 dropped the X11 session, so there a re-login is the only option).
 
 Enable the extension:
 
@@ -43,7 +44,7 @@ make uninstall
 
 ## Requirements
 
-- GNOME Shell 46, 47, 48 or 49
+- GNOME Shell 46 to 50
 - GLib, Clutter, Gio (bundled with GNOME)
 
 ## License
