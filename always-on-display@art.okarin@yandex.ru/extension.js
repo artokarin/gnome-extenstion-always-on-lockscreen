@@ -694,8 +694,8 @@ export default class AlwaysOnDisplayExtension extends Extension {
     }
 
     disable() {
-        // GNOME calls disable() on the switch to the lock screen, where AOD
-        // must keep running — clean up only once the session leaves it.
+        // The unlock-dialog session mode is what keeps AOD running on the lock
+        // screen, where GNOME calls disable(); clean up only once it is over.
         if (!Main.sessionMode.isLocked && this._aod) {
             this._aod.disable();
             this._aod = null;
