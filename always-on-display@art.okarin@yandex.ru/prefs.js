@@ -5,7 +5,7 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-function _getProperty(name, path, iface, prop, callback) {
+function getProperty(name, path, iface, prop, callback) {
     Gio.DBus.session.call(
         name, path, 'org.freedesktop.DBus.Properties', 'Get',
         new GLib.Variant('(ss)', [iface, prop]),
@@ -24,14 +24,14 @@ function _getProperty(name, path, iface, prop, callback) {
 // process and cannot look at the shell's BrightnessManager, so ask D-Bus:
 // GNOME 49+ answers on org.gnome.Shell.Brightness, 46-48 on
 // gnome-settings-daemon, whose interface 49 removed.
-function _hasBacklight(callback) {
-    _getProperty('org.gnome.Shell.Brightness', '/org/gnome/Shell/Brightness',
+function probeBacklight(callback) {
+    getProperty('org.gnome.Shell.Brightness', '/org/gnome/Shell/Brightness',
         'org.gnome.Shell.Brightness', 'HasBrightnessControl', shellAnswer => {
             if (typeof shellAnswer === 'boolean') {
                 callback(shellAnswer);
                 return;
             }
-            _getProperty('org.gnome.SettingsDaemon.Power', '/org/gnome/SettingsDaemon/Power',
+            getProperty('org.gnome.SettingsDaemon.Power', '/org/gnome/SettingsDaemon/Power',
                 'org.gnome.SettingsDaemon.Power.Screen', 'Brightness', level => {
                     // Nobody answered: assume a backlight rather than greying
                     // out a control that may well work.
@@ -42,15 +42,15 @@ function _hasBacklight(callback) {
 
 // Read the <range> of an integer key from the GSettings schema, so the
 // bounds live in one place only
-function _getIntRange(settings, key) {
+function getIntRange(settings, key) {
     const [type, value] = settings.settings_schema.get_key(key).get_range().deep_unpack();
     if (type !== 'range')
         throw new Error(`Schema key '${key}' has no range`);
     return value.deep_unpack();
 }
 
-function _addSpinRow(group, settings, key, {title, subtitle, step = 1, page = 10}) {
-    const [lower, upper] = _getIntRange(settings, key);
+function addSpinRow(group, settings, key, {title, subtitle, step = 1, page = 10}) {
+    const [lower, upper] = getIntRange(settings, key);
     const row = new Adw.SpinRow({
         title,
         subtitle,
@@ -89,12 +89,12 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         generalGroup.add(batteryRow);
 
-        _addSpinRow(generalGroup, settings, 'aod-timeout', {
+        addSpinRow(generalGroup, settings, 'aod-timeout', {
             title: _('AOD timeout (minutes)'),
             subtitle: _('0 = stay on indefinitely'),
         });
 
-        _addSpinRow(generalGroup, settings, 'idle-delay', {
+        addSpinRow(generalGroup, settings, 'idle-delay', {
             title: _('Idle delay (seconds)'),
             subtitle: _('Inactivity time before AOD re-activates on lock screen'),
         });
@@ -115,7 +115,7 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         const brightnessRow = new Adw.ActionRow({
             title: _('AOD brightness (%)'),
         });
-        const [brightnessLower, brightnessUpper] = _getIntRange(settings, 'brightness-reduction');
+        const [brightnessLower, brightnessUpper] = getIntRange(settings, 'brightness-reduction');
         const brightnessScale = new Gtk.Scale({
             orientation: Gtk.Orientation.HORIZONTAL,
             adjustment: new Gtk.Adjustment({
@@ -153,7 +153,7 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
 
         syncDimmingRows();
         settings.connect('changed::software-dimming', () => syncDimmingRows());
-        _hasBacklight(available => {
+        probeBacklight(available => {
             hasBacklight = available;
             syncDimmingRows();
         });
@@ -164,14 +164,14 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
         });
         page.add(animGroup);
 
-        _addSpinRow(animGroup, settings, 'fade-in-time', {
+        addSpinRow(animGroup, settings, 'fade-in-time', {
             title: _('Fade-in time (ms)'),
             subtitle: _('Duration of fade when entering AOD'),
             step: 100,
             page: 500,
         });
 
-        _addSpinRow(animGroup, settings, 'fade-out-time', {
+        addSpinRow(animGroup, settings, 'fade-out-time', {
             title: _('Fade-out time (ms)'),
             subtitle: _('Duration of fade when exiting AOD'),
             step: 50,

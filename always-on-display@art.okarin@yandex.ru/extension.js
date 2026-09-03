@@ -1,5 +1,5 @@
-// Always On Display for GNOME Shell 46+
-// Shows clock/date/notifications on black background instead of blanking the display
+// Always On Display: keeps the lock screen visible on a dimmed black
+// background instead of letting the display blank.
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
@@ -7,12 +7,9 @@ import GLib from 'gi://GLib';
 import St from 'gi://St';
 
 import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
-
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {UnlockDialog} from 'resource:///org/gnome/shell/ui/unlockDialog.js';
-import {loadInterfaceXML} from 'resource:///org/gnome/shell/misc/fileUtils.js';
 
-// D-Bus interface for display power management
 const DisplayConfigIface = `<node>
 <interface name="org.gnome.Mutter.DisplayConfig">
     <property name="PowerSaveMode" type="i" access="readwrite"/>
@@ -20,11 +17,15 @@ const DisplayConfigIface = `<node>
 </node>`;
 const DisplayConfigProxy = Gio.DBusProxy.makeProxyWrapper(DisplayConfigIface);
 
-// D-Bus interface for UPower (battery monitoring)
-const UPowerIface = loadInterfaceXML('org.freedesktop.UPower');
+const UPowerIface = `<node>
+<interface name="org.freedesktop.UPower">
+    <property name="OnBattery" type="b" access="read"/>
+</interface>
+</node>`;
 const UPowerProxy = Gio.DBusProxy.makeProxyWrapper(UPowerIface);
 
-// D-Bus interface for screen brightness
+// GNOME 46-48 only: gnome-settings-daemon dropped this interface in 49, where
+// the shell's own BrightnessManager took over the backlight.
 const BrightnessIface = `<node>
 <interface name="org.gnome.SettingsDaemon.Power.Screen">
     <property name="Brightness" type="i" access="readwrite"/>
@@ -32,167 +33,173 @@ const BrightnessIface = `<node>
 </node>`;
 const BrightnessProxy = Gio.DBusProxy.makeProxyWrapper(BrightnessIface);
 
+function onProxyReady(proxy, error) {
+    if (error)
+        logError(error, 'Always On Display');
+}
+
 class AlwaysOnDisplay {
     constructor(settings) {
         this._settings = settings;
+        this._injectionManager = new InjectionManager();
+        this._idleMonitor = global.backend.get_core_idle_monitor();
+
         this._inAOD = false;
         this._inLock = false;
         this._screenBlanked = false;
-        this._savedBrightness = -1;
+        this._dimOverlay = null;
+        this._savedBrightness = null;
         this._savedDimming = null;
         this._savedDimmingTarget = null;
-        this._dimOverlay = null;
         this._aodTimeoutId = 0;
         this._idleWatchId = 0;
         this._promptIdleWatchId = 0;
         this._userActiveWatchId = 0;
-        this._injectionManager = new InjectionManager();
 
-        // D-Bus proxies
-        this._displayProxy = new DisplayConfigProxy(
-            Gio.DBus.session,
-            'org.gnome.Mutter.DisplayConfig',
-            '/org/gnome/Mutter/DisplayConfig',
-            (proxy, error) => {
-                if (error)
-                    logError(error, 'AlwaysOnDisplay: DisplayConfig proxy error');
-            }
-        );
+        this._displayProxy = new DisplayConfigProxy(Gio.DBus.session,
+            'org.gnome.Mutter.DisplayConfig', '/org/gnome/Mutter/DisplayConfig',
+            onProxyReady);
 
-        this._powerSignalId = 0;
-        this._powerProxy = new UPowerProxy(
-            Gio.DBus.system,
-            'org.freedesktop.UPower',
-            '/org/freedesktop/UPower',
-            (proxy, error) => {
-                if (error) {
-                    logError(error, 'AlwaysOnDisplay: UPower proxy error');
-                    return;
-                }
-                this._powerSignalId = this._powerProxy.connect(
-                    'g-properties-changed',
-                    this._onPowerChanged.bind(this));
-            }
-        );
+        this._powerProxy = new UPowerProxy(Gio.DBus.system,
+            'org.freedesktop.UPower', '/org/freedesktop/UPower', onProxyReady);
+        this._powerProxy.connectObject('g-properties-changed',
+            () => this._onPowerChanged(), this);
 
-        this._brightnessProxy = new BrightnessProxy(
-            Gio.DBus.session,
-            'org.gnome.SettingsDaemon.Power',
-            '/org/gnome/SettingsDaemon/Power',
-            (proxy, error) => {
-                if (error)
-                    logError(error, 'AlwaysOnDisplay: Brightness proxy error');
-            }
-        );
-
-        this._idleMonitor = global.backend.get_core_idle_monitor();
+        this._brightnessProxy = Main.brightnessManager
+            ? null
+            : new BrightnessProxy(Gio.DBus.session, 'org.gnome.SettingsDaemon.Power',
+                '/org/gnome/SettingsDaemon/Power', onProxyReady);
     }
 
     enable() {
+        const controller = this;
         const ss = Main.screenShield;
+        const im = this._injectionManager;
 
-        this._injectionManager.overrideMethod(ss, '_setActive',
-            original => _createSetActiveHook(this, original));
-        this._injectionManager.overrideMethod(ss, '_activateFade',
-            original => _createActivateFadeHook(this, original));
-        this._injectionManager.overrideMethod(ss, '_resetLockScreen',
-            original => _createResetLockScreenHook(this, original));
-        this._injectionManager.overrideMethod(ss, '_onUserBecameActive',
-            original => _createOnUserBecameActiveHook(this, original));
+        // The shell blanks the display by emitting active-changed, which
+        // gnome-settings-daemon turns into DPMS off. Making that emission
+        // conditional is what keeps the display on.
+        im.overrideMethod(ss, '_setActive', () => function (active) {
+            const wasActive = this._isActive;
+            this._isActive = active;
 
-        // Ubuntu-only patch (configure_login_screen) — absent upstream, so
-        // guard like _showClock below.
-        if (typeof ss._refreshBackground === 'function') {
-            this._injectionManager.overrideMethod(ss, '_refreshBackground',
-                original => _createRefreshBackgroundHook(this, original));
+            if (active)
+                controller._onLocked();
+            else
+                controller._onUnlocked();
+
+            if (wasActive !== active && !controller._isAODEnabled())
+                this.emit('active-changed');
+
+            this._syncInhibitor();
+        });
+
+        // Fading the lock screen to black is exactly what AOD replaces.
+        im.overrideMethod(ss, '_activateFade', original => function (lightbox, time) {
+            if (controller._inLock && controller._isAODEnabled())
+                controller._enterAOD();
+            else
+                original.call(this, lightbox, time);
+        });
+
+        // Same reason, for the fade the shell runs as it puts the lock screen up
+        im.overrideMethod(ss, '_resetLockScreen', original => function (params) {
+            original.call(this, {
+                ...params,
+                fadeToBlack: params.fadeToBlack && !controller._isAODEnabled(),
+            });
+        });
+
+        // Input returns to the clock view rather than to a blank screen.
+        im.overrideMethod(ss, '_onUserBecameActive', original => function () {
+            original.call(this);
+            if (controller._inAOD)
+                controller._exitAOD();
+        });
+
+        // Not upstream: Ubuntu's configure_login_screen patch sets an inline
+        // background style that would win over our stylesheet class.
+        if (ss._refreshBackground) {
+            im.overrideMethod(ss, '_refreshBackground', original => function () {
+                original.call(this);
+                this._lockDialogGroup.set_style(null);
+            });
         }
 
-        // On the prototype, not ss._dialog: the dialog is recreated per lock.
-        // _showClock is private API, so degrade instead of failing enable().
-        if (typeof UnlockDialog?.prototype?._showClock === 'function') {
-            this._injectionManager.overrideMethod(UnlockDialog.prototype, '_showClock',
-                original => _createShowClockHook(this, original));
-        } else {
-            console.debug('AOD: UnlockDialog._showClock missing — prompt re-arm degraded');
+        // On the prototype, since the dialog is recreated on every lock. This
+        // catches the shell returning from the password prompt to the clock.
+        if (UnlockDialog.prototype._showClock) {
+            im.overrideMethod(UnlockDialog.prototype, '_showClock', original => function () {
+                original.call(this);
+                controller._setupIdleWatch();
+            });
         }
 
-        // Always keep lockDialogGroup black — it's the layer behind blurred backgrounds
+        // The layer revealed once the lock screen backgrounds fade out
         ss._lockDialogGroup.set_style(null);
         ss._lockDialogGroup.add_style_class_name('aod-lock-background');
     }
 
     disable() {
         this._injectionManager.clear();
+        this._powerProxy.disconnectObject(this);
 
-        // Restore original lockDialogGroup style by re-running the (now
-        // restored) original method. Nothing to restore where Ubuntu's patch
-        // is absent — the style was never set inline there.
         Main.screenShield._lockDialogGroup.remove_style_class_name('aod-lock-background');
+        // Puts back the inline style the (now restored) original sets; there
+        // is nothing to restore where Ubuntu's patch is absent.
         Main.screenShield._refreshBackground?.();
 
-        if (this._powerSignalId !== 0) {
-            this._powerProxy.disconnect(this._powerSignalId);
-            this._powerSignalId = 0;
-        }
+        this._exitAOD({animate: false});
 
-        this._clearAODTimeout();
-        this._clearIdleWatch();
-        this._clearUserActiveWatch();
-
-        if (this._inAOD)
-            this._exitAOD({animate: false});
-
-        // A backlight left turned down, or a borrowed dim target, would follow
-        // the user into their session. The overlay needs no such care —
-        // destroying it suffices.
-        this._undimBacklight();
-
-        if (this._dimOverlay) {
-            this._dimOverlay.destroy();
-            this._dimOverlay = null;
-        }
+        this._dimOverlay?.destroy();
+        this._dimOverlay = null;
     }
 
-    isAODEnabled() {
-        if (this._settings.get_boolean('disable-on-battery') && this._isOnBattery())
-            return false;
-        return true;
+    _isAODEnabled() {
+        return !(this._settings.get_boolean('disable-on-battery') &&
+                 this._powerProxy.OnBattery);
     }
 
-    _isOnBattery() {
-        try {
-            return this._powerProxy.OnBattery;
-        } catch {
-            return false;
-        }
-    }
-
-    // The unlock dialog shows either the clock or the password prompt.
-    // AOD must only ever cover the clock page.
+    // The unlock dialog shows either the clock or the password prompt, and AOD
+    // must only ever cover the clock.
     _isOnPromptScreen() {
         const dialog = Main.screenShield._dialog;
         return !!dialog && dialog._activePage === dialog._promptBox;
+    }
+
+    _onLocked() {
+        this._inLock = true;
+        this._screenBlanked = false;
+
+        // Enter AOD right away: this is the point where the display would
+        // otherwise blank.
+        if (this._isAODEnabled())
+            this._enterAOD();
+    }
+
+    _onUnlocked() {
+        this._inLock = false;
+        this._screenBlanked = false;
+        this._exitAOD({animate: false});
     }
 
     _onPowerChanged() {
         if (!this._inLock)
             return;
 
-        if (this._isOnBattery() && this._settings.get_boolean('disable-on-battery')) {
-            // Switched to battery while in AOD — blank the screen normally
+        if (!this._isAODEnabled()) {
             this._blankScreenNormally();
-        } else if (!this._isOnBattery() && this._inLock && !this._inAOD) {
-            // Switched to AC while locked — enter AOD
-            this._turnOnMonitor();
+        } else if (!this._inAOD) {
+            // Back on AC, where the display is likely blanked already
+            this._displayProxy.PowerSaveMode = 0;
             this._enterAOD();
         }
     }
 
     // Blank the vanilla way: active-changed makes gnome-settings-daemon turn
-    // the display off. _screenBlanked keeps _setActive from re-emitting it.
+    // the display off. _screenBlanked keeps us from emitting it twice.
     _blankScreenNormally() {
-        if (this._inAOD)
-            this._exitAOD({animate: false});
+        this._exitAOD({animate: false});
 
         if (Main.screenShield._isActive && !this._screenBlanked) {
             Main.screenShield.emit('active-changed');
@@ -201,186 +208,182 @@ class AlwaysOnDisplay {
     }
 
     _enterAOD() {
-        if (this._inAOD)
+        if (this._inAOD || !this._inLock)
             return;
 
-        // Never black out the prompt. Arm the idle watch on the way out —
-        // nothing else would bring AOD back if we lock with the prompt up.
         if (this._isOnPromptScreen()) {
             this._setupIdleWatch();
             return;
         }
 
         this._inAOD = true;
-        console.debug('AOD: entering AOD mode');
 
-        // Turn off any active lightboxes that may be covering the lock screen
         const ss = Main.screenShield;
         ss._longLightbox.lightOff();
         ss._shortLightbox.lightOff();
 
-        const dialog = ss._dialog;
-        if (dialog && dialog._backgroundGroup) {
-            const fadeInTime = this._settings.get_int('fade-in-time');
-            console.debug(`AOD: fading background to black over ${fadeInTime}ms`);
-            dialog._backgroundGroup.remove_all_transitions();
-            dialog._backgroundGroup.ease({
-                opacity: 0,
-                duration: fadeInTime,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-            });
-        } else {
-            console.debug(`AOD: no dialog or backgroundGroup found (dialog=${!!dialog})`);
-        }
+        this._fadeBackground({
+            opacity: 0,
+            duration: this._settings.get_int('fade-in-time'),
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
 
         this._dim();
         this._startAODTimeout();
         this._clearIdleWatch();
-        this._setupUserActiveWatch();
+
+        this._userActiveWatchId = this._idleMonitor.add_user_active_watch(() => {
+            this._userActiveWatchId = 0;
+            this._exitAOD();
+        });
     }
 
     _exitAOD({animate = true} = {}) {
-        if (animate && !this._inAOD)
-            return;
-
         this._inAOD = false;
-        console.debug(`AOD: exiting AOD mode (animate=${animate})`);
 
-        const dialog = Main.screenShield._dialog;
-        if (dialog && dialog._backgroundGroup) {
-            dialog._backgroundGroup.remove_all_transitions();
-            if (animate) {
-                dialog._backgroundGroup.ease({
-                    opacity: 255,
-                    duration: this._settings.get_int('fade-out-time'),
-                    mode: Clutter.AnimationMode.EASE_IN_QUAD,
-                });
-            } else {
-                dialog._backgroundGroup.opacity = 255;
-            }
-        }
+        this._fadeBackground({
+            opacity: 255,
+            duration: animate ? this._settings.get_int('fade-out-time') : 0,
+            mode: Clutter.AnimationMode.EASE_IN_QUAD,
+        });
 
         this._undim({animate});
         this._clearAODTimeout();
         this._clearUserActiveWatch();
 
-        // Animated exit means the user is interacting: re-arm the idle watch.
-        // Immediate exit means the lock screen is going away — drop it.
+        // An animated exit means the user is interacting, so AOD should come
+        // back on idle; an immediate one means the lock screen is going away.
         if (animate)
             this._setupIdleWatch();
         else
             this._clearIdleWatch();
     }
 
-    // GNOME 46-48: the backlight belongs to gnome-settings-daemon. Reports
-    // whether there was anything to dim.
-    _reduceBrightness() {
-        try {
-            const currentBrightness = this._brightnessProxy.Brightness;
-            // The same test the shell's own brightness slider uses. Plain
-            // `>= 0` would pass: a missing interface reads back as null, and
-            // null >= 0 is true in JS.
-            if (!Number.isInteger(currentBrightness) || currentBrightness < 0)
-                return false;
-
-            this._savedBrightness = currentBrightness;
-            const reduction = this._settings.get_int('brightness-reduction');
-            this._brightnessProxy.Brightness =
-                Math.max(1, Math.round(currentBrightness * reduction / 100));
-            return true;
-        } catch {
-            // Brightness control not available (e.g. desktop without backlight)
-            return false;
-        }
-    }
-
-    _restoreBrightness() {
-        if (this._savedBrightness < 0)
+    // Fading the dialog's own backgrounds out reveals the black
+    // _lockDialogGroup behind them, leaving the clock and notifications.
+    _fadeBackground(params) {
+        const backgroundGroup = Main.screenShield._dialog?._backgroundGroup;
+        if (!backgroundGroup)
             return;
 
-        try {
-            this._brightnessProxy.Brightness = this._savedBrightness;
-        } catch {
-            // Ignore
-        }
-        this._savedBrightness = -1;
+        backgroundGroup.remove_all_transitions();
+        if (params.duration > 0)
+            backgroundGroup.ease(params);
+        else
+            backgroundGroup.opacity = params.opacity;
     }
 
-    // GNOME 49 moved the backlight into the shell and dropped the
-    // SettingsDaemon.Power.Screen interface the branch above talks to.
-    _dimViaShell() {
-        const manager = Main.brightnessManager;
-        const scale = manager.globalScale;
-        // Null when no monitor has a backlight — same test the shell uses for
-        // its own HasBrightnessControl.
-        if (!scale)
-            return false;
+    // The setting picks the mechanism, and neither stands in for the other:
+    // the overlay only darkens the image, so outside OLED it emits just as
+    // much light. _undim() undoes both, since the choice may have changed
+    // while AOD was up.
+    _dim() {
+        if (!this._settings.get_boolean('software-dimming')) {
+            this._dimBacklight();
+            return;
+        }
 
-        this._savedDimming = manager.dimming;
+        const level = this._settings.get_int('brightness-reduction');
+        if (level >= 100)
+            return;
+
+        // Black at alpha (1 - N%) is exactly an N% brightness scale
+        this._ensureDimOverlay().ease({
+            opacity: Math.round(255 * (1 - level / 100)),
+            duration: this._settings.get_int('fade-in-time'),
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
+    }
+
+    _undim({animate = true} = {}) {
+        if (this._dimOverlay) {
+            // Assigning opacity mid-transition only retargets it
+            this._dimOverlay.remove_transition('opacity');
+            if (animate) {
+                this._dimOverlay.ease({
+                    opacity: 0,
+                    duration: this._settings.get_int('fade-out-time'),
+                    mode: Clutter.AnimationMode.EASE_IN_QUAD,
+                });
+            } else {
+                this._dimOverlay.opacity = 0;
+            }
+        }
+
+        this._undimBacklight();
+    }
+
+    _dimBacklight() {
+        const level = this._settings.get_int('brightness-reduction');
+        const manager = Main.brightnessManager;
+
+        if (!manager) {
+            // A missing interface reads back as null, and null >= 0 is true,
+            // hence the type test the shell's own brightness slider uses.
+            const brightness = this._brightnessProxy.Brightness;
+            if (!Number.isInteger(brightness) || brightness < 0)
+                return;
+
+            this._savedBrightness = brightness;
+            this._brightnessProxy.Brightness =
+                Math.max(1, Math.round(brightness * level / 100));
+            return;
+        }
+
+        // GNOME 49+. A null scale means no monitor has a backlight.
+        const scale = manager.globalScale;
+        if (!scale)
+            return;
 
         // dimming clips the backlight to _dimmingTarget instead of scaling it,
-        // so a bare level would be a no-op whenever the user sits below it.
-        // The field is private, so fall back to the system dim level rather
-        // than failing if it ever goes away.
+        // so the level has to go there or it is a no-op for anyone already
+        // below it. That field is private, so fall back to the system dim
+        // level rather than failing should it ever go away.
         if (typeof manager._dimmingTarget === 'number') {
-            const level = this._settings.get_int('brightness-reduction');
             this._savedDimmingTarget = manager._dimmingTarget;
             manager._dimmingTarget = scale.value * level / 100;
-        } else {
-            console.debug('AOD: no _dimmingTarget — dimming to the system level');
         }
 
         // Assigning _dimmingTarget syncs nothing; the dimming setter does.
+        this._savedDimming = manager.dimming;
         manager.dimming = true;
-        return true;
     }
 
-    _undimViaShell() {
+    _undimBacklight() {
+        if (this._savedBrightness !== null) {
+            this._brightnessProxy.Brightness = this._savedBrightness;
+            this._savedBrightness = null;
+        }
+
         if (this._savedDimming === null)
             return;
 
         const manager = Main.brightnessManager;
 
         // Restore the target first: the dimming setter below is what syncs the
-        // backlight, and it must sync against the original value. Leaving ours
-        // behind would quietly apply it to the system's own idle dim until the
-        // next shell restart.
+        // backlight, and leaving ours behind would quietly apply it to the
+        // system's own idle dim until the next shell restart.
         if (this._savedDimmingTarget !== null) {
             manager._dimmingTarget = this._savedDimmingTarget;
             this._savedDimmingTarget = null;
         }
 
-        // Back to what it was, not to false — the session may have been idle
+        // Back to what it was, not to false: the session may have been idle
         // dimming already when the screen locked.
         manager.dimming = this._savedDimming;
         this._savedDimming = null;
     }
 
-    // Which of the two backlight paths exists depends on the shell version.
-    _dimBacklight() {
-        if (Main.brightnessManager)
-            return this._dimViaShell();
-        return this._reduceBrightness();
-    }
-
-    _undimBacklight() {
-        this._undimViaShell();
-        this._restoreBrightness();
-    }
-
-    // Our own full-stage black actor that the lock screen is dimmed through.
-    // Setting opacity on GNOME's own actors was tried first and lost to the
-    // top panel — shared chrome the shell and other extensions rearrange.
+    // A black actor of our own, covering every monitor. Setting opacity on the
+    // shell's actors instead does not work: the top panel is shared chrome.
     _ensureDimOverlay() {
         if (!this._dimOverlay) {
             this._dimOverlay = new St.Widget({
                 style_class: 'aod-dim-overlay',
-                // Input has to pass through: any click or key press is what
-                // ends AOD in the first place.
+                // Input has to pass through: it is what ends AOD
                 reactive: false,
                 opacity: 0,
             });
-            // Covers every monitor and follows resolution changes by itself
             this._dimOverlay.add_constraint(new Clutter.BindConstraint({
                 source: global.stage,
                 coordinate: Clutter.BindCoordinate.ALL,
@@ -389,70 +392,8 @@ class AlwaysOnDisplay {
         }
 
         // Other extensions reorder uiGroup, so claim the top on every dim
-        // rather than trusting insertion order.
         Main.uiGroup.set_child_above_sibling(this._dimOverlay, null);
         return this._dimOverlay;
-    }
-
-    // Black at alpha (1 - N%) is exactly an N% brightness scale, and works on
-    // displays with no backlight control at all.
-    _applySoftwareDim() {
-        const level = this._settings.get_int('brightness-reduction');
-        if (level >= 100)
-            return;
-
-        const opacity = Math.round(255 * (1 - level / 100));
-        console.debug(`AOD: dimming through overlay at opacity ${opacity}`);
-
-        this._ensureDimOverlay().ease({
-            opacity,
-            duration: this._settings.get_int('fade-in-time'),
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-        });
-    }
-
-    _clearSoftwareDim({animate = true} = {}) {
-        if (!this._dimOverlay)
-            return;
-
-        // Drop the dim transition first: assigning opacity while one is
-        // running only retargets it instead of setting the value.
-        this._dimOverlay.remove_transition('opacity');
-        if (animate) {
-            this._dimOverlay.ease({
-                opacity: 0,
-                duration: this._settings.get_int('fade-out-time'),
-                mode: Clutter.AnimationMode.EASE_IN_QUAD,
-            });
-        } else {
-            this._dimOverlay.opacity = 0;
-        }
-    }
-
-    // The setting picks the mechanism and nothing substitutes for the other
-    // behind the user's back: the overlay only darkens the image, so outside
-    // OLED it is no stand-in for turning the backlight down. Where the
-    // backlight is missing, prefs says so and offers the overlay explicitly.
-    // _undim() undoes both, since the choice may have changed between entering
-    // and leaving AOD.
-    _dim() {
-        if (this._settings.get_boolean('software-dimming'))
-            this._applySoftwareDim();
-        else if (!this._dimBacklight())
-            console.debug('AOD: nothing to dim — no backlight, and software dimming is off');
-    }
-
-    _undim({animate = true} = {}) {
-        this._clearSoftwareDim({animate});
-        this._undimBacklight();
-    }
-
-    _turnOnMonitor() {
-        try {
-            this._displayProxy.PowerSaveMode = 0;
-        } catch {
-            // Ignore
-        }
     }
 
     _startAODTimeout() {
@@ -462,16 +403,12 @@ class AlwaysOnDisplay {
         if (timeoutMinutes <= 0)
             return;
 
-        this._aodTimeoutId = GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT,
-            timeoutMinutes * 60,
-            () => {
+        this._aodTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+            timeoutMinutes * 60, () => {
                 this._aodTimeoutId = 0;
-                // AOD timeout expired — blank the screen
                 this._blankScreenNormally();
                 return GLib.SOURCE_REMOVE;
-            }
-        );
+            });
     }
 
     _clearAODTimeout() {
@@ -481,35 +418,31 @@ class AlwaysOnDisplay {
         }
     }
 
+    // Bring AOD back once the lock screen goes idle again. On the password
+    // prompt, wait for input instead: an idle watch there would fire straight
+    // back into _enterAOD() and spin, since AOD must not cover the prompt.
     _setupIdleWatch() {
         this._clearIdleWatch();
 
         if (!this._inLock || this._inAOD)
             return;
 
-        // Re-enter AOD after idle period on the lock screen
-        const idleDelaySec = this._settings.get_int('idle-delay');
+        if (this._isOnPromptScreen()) {
+            this._promptIdleWatchId = this._idleMonitor.add_user_active_watch(() => {
+                this._promptIdleWatchId = 0;
+                this._setupIdleWatch();
+            });
+            return;
+        }
+
         this._idleWatchId = this._idleMonitor.add_idle_watch(
-            idleDelaySec * 1000,
-            () => {
-                this._idleWatchId = 0;
-                if (!this._inLock || this._inAOD || !this.isAODEnabled())
-                    return;
-
-                // Don't black out the prompt. Re-arming the idle watch here
-                // would fire right back and spin the shell — wait for input.
-                if (this._isOnPromptScreen()) {
-                    this._promptIdleWatchId = this._idleMonitor.add_user_active_watch(() => {
-                        this._promptIdleWatchId = 0;
-                        if (this._inLock && !this._inAOD)
-                            this._setupIdleWatch();
-                    });
-                    return;
-                }
-
-                this._enterAOD();
-            }
-        );
+            this._settings.get_int('idle-delay') * 1000, () => {
+                // Unlike a user-active watch, an idle watch stays registered
+                // and fires again on the next idle, so drop it by hand.
+                this._clearIdleWatch();
+                if (this._isAODEnabled())
+                    this._enterAOD();
+            });
     }
 
     _clearIdleWatch() {
@@ -523,182 +456,25 @@ class AlwaysOnDisplay {
         }
     }
 
-    _setupUserActiveWatch() {
-        this._clearUserActiveWatch();
-
-        // Watch for user activity to exit AOD
-        this._userActiveWatchId = this._idleMonitor.add_user_active_watch(
-            () => {
-                this._userActiveWatchId = 0;
-                if (this._inAOD)
-                    this._exitAOD();
-            }
-        );
-    }
-
     _clearUserActiveWatch() {
         if (this._userActiveWatchId !== 0) {
             this._idleMonitor.remove_watch(this._userActiveWatchId);
             this._userActiveWatchId = 0;
         }
     }
-
-    onLockScreenActivated() {
-        this._inLock = true;
-        this._screenBlanked = false;
-        console.debug('AOD: lock screen activated');
-
-        // Enter AOD immediately — mirrors the original behavior where
-        // gnome-settings-daemon would blank the display at this point
-        if (this.isAODEnabled() && !this._inAOD)
-            this._enterAOD();
-    }
-
-    onLockScreenDeactivated() {
-        this._inLock = false;
-        this._screenBlanked = false;
-        if (this._inAOD)
-            this._exitAOD({animate: false});
-    }
-
-    // The dialog returned to the clock (GNOME's 120s escape or a failed
-    // unlock), so AOD may cover the screen again.
-    onPromptDismissed() {
-        this._setupIdleWatch();
-    }
 }
-
-// --- Shell method overrides ---
-// Each factory takes the controller and the original method; in the returned
-// function `this` is Main.screenShield, or the UnlockDialog for _showClock.
-
-function _createRefreshBackgroundHook(controller, original) {
-    return function () {
-        // Call the original, which sets _lockDialogGroup style from login-screen settings
-        original.call(this);
-        // Drop that inline style (it would win over the CSS class) and keep
-        // the black background from the stylesheet
-        this._lockDialogGroup.set_style(null);
-    };
-}
-
-// GNOME 46's _setActive with the active-changed emission made conditional —
-// suppressing it keeps the display on. Re-check upstream on version bumps.
-function _createSetActiveHook(controller, _original) {
-    return function (active) {
-        let prevIsActive = this._isActive;
-        this._isActive = active;
-
-        if (active)
-            controller.onLockScreenActivated();
-        else
-            controller.onLockScreenDeactivated();
-
-        if (prevIsActive !== this._isActive) {
-            if (!controller.isAODEnabled() || controller._screenBlanked) {
-                console.debug('AOD: emitting active-changed');
-                this.emit('active-changed');
-                controller._screenBlanked = false;
-            } else {
-                console.debug('AOD: suppressing active-changed (keeping display on)');
-            }
-        }
-
-        this._syncInhibitor();
-    };
-}
-
-function _createActivateFadeHook(controller, original) {
-    return function (lightbox, time) {
-        if (controller._inLock) {
-            // Already on lock screen — enter AOD instead of fading to black
-            if (controller.isAODEnabled()) {
-                controller._enterAOD();
-            } else {
-                // AOD disabled (e.g. on battery) — use original fade
-                original.call(this, lightbox, time);
-            }
-            return;
-        }
-
-        // Not yet locked (session going idle) — do the normal fade
-        // but intercept the lightbox completion to prevent blanking
-        Main.uiGroup.set_child_above_sibling(lightbox, null);
-
-        if (controller.isAODEnabled()) {
-            // Show the lightbox fade but then hide it once lock screen is ready
-            lightbox.lightOn(time);
-
-            if (this._becameActiveId === 0) {
-                this._becameActiveId = this.idleMonitor.add_user_active_watch(
-                    this._onUserBecameActive.bind(this));
-            }
-        } else {
-            // AOD disabled — original behavior
-            original.call(this, lightbox, time);
-        }
-    };
-}
-
-// Full replacement: also covers the shield being merely active (screensaver
-// without lock), and exits AOD to the clock instead of blanking.
-function _createOnUserBecameActiveHook(controller, _original) {
-    return function () {
-        if (this._becameActiveId !== 0) {
-            this.idleMonitor.remove_watch(this._becameActiveId);
-            this._becameActiveId = 0;
-        }
-
-        if (this._isActive || this._isLocked) {
-            // Turn off lightboxes
-            this._longLightbox.lightOff();
-            this._shortLightbox.lightOff();
-
-            // Exit AOD if active — returns to clock view with blurred background
-            if (controller._inAOD)
-                controller._exitAOD();
-        } else {
-            this.deactivate(false);
-        }
-    };
-}
-
-function _createResetLockScreenHook(controller, original) {
-    return function (params) {
-        // In AOD the lock screen must not fade to black — the display stays on
-        original.call(this, {
-            ...params,
-            fadeToBlack: controller.isAODEnabled() ? false : params.fadeToBlack,
-        });
-    };
-}
-
-// UnlockDialog, not ScreenShield: catches GNOME's 120s escape and failed
-// unlocks. Swiping back bypasses this and the user-active watch covers it.
-function _createShowClockHook(controller, original) {
-    return function () {
-        original.call(this);
-        controller.onPromptDismissed();
-    };
-}
-
-// --- Extension entry point ---
 
 export default class AlwaysOnDisplayExtension extends Extension {
     enable() {
-        if (this._aod)
-            return;
-
         this._aod = new AlwaysOnDisplay(this.getSettings());
         this._aod.enable();
     }
 
     disable() {
-        // The unlock-dialog session mode is what keeps AOD running on the lock
-        // screen, where GNOME calls disable(); clean up only once it is over.
-        if (!Main.sessionMode.isLocked && this._aod) {
-            this._aod.disable();
-            this._aod = null;
-        }
+        // The unlock-dialog session mode is required: this extension exists to
+        // replace what the shell does while the screen is locked, so it has to
+        // keep running there.
+        this._aod.disable();
+        this._aod = null;
     }
 }
