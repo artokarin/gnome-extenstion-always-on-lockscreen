@@ -18,6 +18,7 @@ After a configurable idle period on the lock screen, AOD re-activates automatica
 - Configurable AOD timeout (should DPMS poweroff after N minutes, disabled by default)
 - Configurable idle delay before AOD re-activates
 - Battery-aware: optionally disables AOD on battery power
+- OLED protection: the clock, date and notifications glide to a new random position every interval (12 px, 60 s by default), like the "Screen Shift" feature of OLED TVs, so no pixel stays lit in the same place; the black background is not moved
 - Reacts to power source changes in real time (AC plugged in → AOD on, unplugged → screen blanks)
 
 ## Install

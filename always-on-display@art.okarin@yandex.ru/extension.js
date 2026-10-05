@@ -10,6 +10,8 @@ import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extension
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {UnlockDialog} from 'resource:///org/gnome/shell/ui/unlockDialog.js';
 
+import {OledShift} from './oledShift.js';
+
 const DisplayConfigIface = `<node>
 <interface name="org.gnome.Mutter.DisplayConfig">
     <property name="PowerSaveMode" type="i" access="readwrite"/>
@@ -42,6 +44,8 @@ class AlwaysOnDisplay {
     constructor(settings) {
         this._settings = settings;
         this._injectionManager = new InjectionManager();
+        // OLED protection: moves the clock around while AOD is showing
+        this._oledShift = new OledShift(settings);
         this._idleMonitor = global.backend.get_core_idle_monitor();
 
         this._inAOD = false;
@@ -150,6 +154,7 @@ class AlwaysOnDisplay {
         Main.screenShield._refreshBackground?.();
 
         this._exitAOD({animate: false});
+        this._oledShift.stop();
 
         this._dimOverlay?.destroy();
         this._dimOverlay = null;
@@ -231,6 +236,7 @@ class AlwaysOnDisplay {
         this._dim();
         this._startAODTimeout();
         this._clearIdleWatch();
+        this._oledShift.start();
 
         this._userActiveWatchId = this._idleMonitor.add_user_active_watch(() => {
             this._userActiveWatchId = 0;
@@ -240,6 +246,7 @@ class AlwaysOnDisplay {
 
     _exitAOD({animate = true} = {}) {
         this._inAOD = false;
+        this._oledShift.stop();
 
         this._fadeBackground({
             opacity: 255,

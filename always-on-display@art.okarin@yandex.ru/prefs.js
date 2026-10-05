@@ -158,6 +158,33 @@ export default class AlwaysOnDisplayPreferences extends ExtensionPreferences {
             syncDimmingRows();
         });
 
+        // OLED group
+        const oledGroup = new Adw.PreferencesGroup({
+            title: _('OLED protection'),
+            description: _('Keeps static content from sitting on the same pixels, like the Screen Shift feature of OLED TVs'),
+        });
+        page.add(oledGroup);
+
+        const shiftRow = new Adw.SwitchRow({
+            title: _('Shift content'),
+            subtitle: _('Glide the clock and notifications to a new spot at every interval'),
+        });
+        settings.bind('oled-shift', shiftRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        oledGroup.add(shiftRow);
+
+        addSpinRow(oledGroup, settings, 'oled-shift-radius', {
+            title: _('Shift distance (pixels)'),
+            subtitle: _('Maximum distance from the normal position'),
+        });
+
+        addSpinRow(oledGroup, settings, 'oled-shift-interval', {
+            title: _('Shift interval (seconds)'),
+            subtitle: _('How often the content moves'),
+            step: 5,
+            page: 30,
+        });
+
         // Animation group
         const animGroup = new Adw.PreferencesGroup({
             title: _('Animation'),
