@@ -76,6 +76,9 @@ class AlwaysOnDisplay {
         const ss = Main.screenShield;
         const im = this._injectionManager;
 
+        // The shell has already announced the lock screen if it is up
+        this._screenBlanked = ss._isActive;
+
         // The shell blanks the display by emitting active-changed, which
         // gnome-settings-daemon turns into DPMS off. Making that emission
         // conditional is what keeps the display on.
@@ -88,8 +91,8 @@ class AlwaysOnDisplay {
             else
                 controller._onUnlocked();
 
-            if (wasActive !== active && !controller._isAODEnabled())
-                this.emit('active-changed');
+            if (wasActive !== active)
+                controller._announceActive(active);
 
             this._syncInhibitor();
         });
@@ -169,7 +172,6 @@ class AlwaysOnDisplay {
 
     _onLocked() {
         this._inLock = true;
-        this._screenBlanked = false;
 
         // Enter AOD right away: this is the point where the display would
         // otherwise blank.
@@ -179,7 +181,6 @@ class AlwaysOnDisplay {
 
     _onUnlocked() {
         this._inLock = false;
-        this._screenBlanked = false;
         this._exitAOD({animate: false});
     }
 
@@ -205,6 +206,22 @@ class AlwaysOnDisplay {
             Main.screenShield.emit('active-changed');
             this._screenBlanked = true;
         }
+    }
+
+    // gnome-settings-daemon follows the lock screen only through
+    // active-changed, and blanks the display after 30 s of idle for as long as
+    // it believes the lock screen is up. So a lock it was told about must be
+    // followed by the unlock, even if AOD came on in between (the charger was
+    // plugged in while locked); otherwise the unlocked desktop keeps blanking.
+    // _screenBlanked is what it was last told.
+    _announceActive(active) {
+        if (active === this._screenBlanked)
+            return;
+        if (active && this._isAODEnabled())
+            return;
+
+        Main.screenShield.emit('active-changed');
+        this._screenBlanked = active;
     }
 
     _enterAOD() {
